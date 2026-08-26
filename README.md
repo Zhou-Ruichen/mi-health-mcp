@@ -56,6 +56,26 @@ mcp_servers:
 
 将 URL 替换为你自己部署的 Worker 地址。`MI_HEALTH_AUTH_TOKEN` 的值必须与该 Worker 的 `AUTH_TOKEN` Secret 一致。示例不包含真实凭证。
 
+### Hermes skill
+
+仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md) 负责把“我/本人”和“亲友”请求分流到正确工具，并说明紧凑结果的字段含义。仓库公开后，可从原始文件 URL 安装：
+
+```bash
+hermes skills install https://raw.githubusercontent.com/<your-github-account>/mi-health-mcp/main/skills/mi-health/SKILL.md
+hermes skills list
+```
+
+skill 不会自动创建定时任务。需要将它连接到已有任务时，先检查任务及近期执行记录，再按任务 ID 添加：
+
+```bash
+hermes cron status
+hermes cron list
+hermes cron runs <job-id>
+hermes cron edit <job-id> --add-skill mi-health
+```
+
+定时任务在独立会话中执行，prompt 需要明确查询目标、天数、时区、发送位置和失败时的处理方式。不要在 prompt 中放入任何凭证；定期任务应固定 provider 和 model，避免全局默认值变化后行为改变。
+
 ## 使用流程
 
 1. 配置 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 后调用 `health_login_status`，Worker 会换取或恢复 `miothealth` session。
