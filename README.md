@@ -31,6 +31,17 @@ npx wrangler deploy
 
 `AUTH_TOKEN` 的值请使用自己生成的长随机串，不要写进源码、`wrangler.toml` 或 Git。
 
+### passToken 登录
+
+如果小米扫码登录不可用，可以将 Xiaomi Account 的 `userId` 和 `passToken` 作为 Cloudflare Secret 设置。Worker 会用它们换取 `sid=miothealth` 的短期健康 API session；原始 `passToken` 不会写入 KV 或通过 MCP 返回。
+
+```bash
+npx wrangler secret put XIAOMI_USER_ID
+npx wrangler secret put XIAOMI_PASS_TOKEN
+```
+
+也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。两个 Secret 必须同时设置，不能写入 `wrangler.toml`。
+
 ## 部署后配置
 
 1. 创建 KV namespace：
@@ -72,11 +83,14 @@ KV binding 名必须保持为 `MI_HEALTH_KV`。
 5. 登录成功后，使用 `health_me` 确认当前账号，再使用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询本人数据。
 6. 要查询亲友时，先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
 
+如果配置了 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN`，可先调用 `health_login_status`。它会自动换取或恢复 `miothealth` session；session 过期后，健康查询也会自动换取一次并重试。二维码登录仍可作为未配置 Secret 时的 fallback。
+
 Worker 不生成二维码图片。健康查询默认 `target: "self"`，使用扫码登录账号的本人数据接口；不会把登录账号当作亲友，也不会自动选择亲友列表的第一项。
 
 ### MCP tools
 
 - `health_me`：返回当前登录状态和 `user_id`，不返回凭证。
+- `health_login_status`：返回当前健康 API session 是否可用及登录方式，不返回凭证。
 - `health_relatives`：列出可查询亲友的 `relative_uid` 和备注。
 - `health_latest`：查询最新的睡眠、心率和步数。
 - `health_sleep`、`health_heart`、`health_steps`：查询最近 1 至 30 天的对应记录。

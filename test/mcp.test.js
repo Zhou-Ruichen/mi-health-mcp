@@ -49,8 +49,8 @@ function tokenRecord(overrides = {}) {
   };
 }
 
-function envWithKv(kv = new MemoryKv()) {
-  return { AUTH_TOKEN, MI_HEALTH_KV: kv };
+function envWithKv(kv = new MemoryKv(), overrides = {}) {
+  return { AUTH_TOKEN, MI_HEALTH_KV: kv, ...overrides };
 }
 
 function mcpRequest(body, bearer = AUTH_TOKEN) {
@@ -97,6 +97,52 @@ function encryptedApiMock(routes) {
     return new Response(ciphertext, { status: 200 });
   };
   fetchImpl.calls = calls;
+  return fetchImpl;
+}
+
+function passTokenSessionMock({ healthRoute, serviceLoginCode = 0 } = {}) {
+  const healthFetch = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": healthRoute || {
+      code: 0,
+      result: { data_list: [], has_more: false },
+    },
+  });
+  const accountCalls = [];
+  const fetchImpl = async (input, options = {}) => {
+    const url = new URL(input);
+    if (url.hostname === "account.xiaomi.com" && url.pathname === "/pass/serviceLogin") {
+      accountCalls.push({ url, options });
+      assert.equal(url.searchParams.get("_json"), "true");
+      assert.equal(url.searchParams.get("sid"), "miothealth");
+      assert.match(options.headers.Cookie, /userId=synthetic-user/);
+      assert.match(options.headers.Cookie, /passToken=synthetic-pass-token/);
+      return new Response(
+        `&&&START&&&${JSON.stringify(
+          serviceLoginCode === 0
+            ? {
+                code: 0,
+                userId: "account-user",
+                cUserId: "c-user-secret",
+                ssecurity: SSECURITY,
+                nonce: "nonce-value",
+                location: "https://sts.api.io.mi.com/login-complete?sid=miothealth",
+              }
+            : { code: serviceLoginCode },
+        )}`,
+        { status: 200 },
+      );
+    }
+    if (url.hostname === "sts.api.io.mi.com" && url.pathname === "/login-complete") {
+      assert.ok(url.searchParams.get("clientSign"));
+      return new Response(null, {
+        status: 302,
+        headers: { "Set-Cookie": "serviceToken=service-token-secret; Path=/; HttpOnly" },
+      });
+    }
+    return healthFetch(input, options);
+  };
+  fetchImpl.accountCalls = accountCalls;
+  fetchImpl.healthCalls = healthFetch.calls;
   return fetchImpl;
 }
 
@@ -153,6 +199,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_auth_status",
       "health_me",
       "health_relatives",
+      "health_login_status",
       "health_login_start",
       "health_login_poll",
     ],
@@ -221,6 +268,20 @@ test("health_me explains how to log in when no credential is stored", async () =
 
   assert.equal(result.json.result.isError, true);
   assert.match(result.json.result.content[0].text, /health_login_start/);
+});
+
+test("health_login_status is usable when passToken secrets are absent", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const result = await callMcp(worker, envWithKv(), {
+    jsonrpc: "2.0",
+    id: 33,
+    method: "tools/call",
+    params: { name: "health_login_status", arguments: {} },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.logged_in, false);
+  assert.equal(value.session_valid, false);
+  assert.match(value.message, /XIAOMI_USER_ID/);
 });
 
 test("health_latest defaults to the signed-in account and uses the self data endpoint", async () => {
@@ -430,6 +491,177 @@ test("relative queries require relative_uid and use relatives endpoints", async 
   assert.equal(fetchImpl.calls.at(-1).url.pathname, "/app/v1/relatives/get_aggregated_data");
 });
 
+test("passToken secrets create and persist a miothealth session without storing passToken", async () => {
+  const kv = new MemoryKv();
+  const fetchImpl = passTokenSessionMock();
+  const env = envWithKv(kv, {
+    XIAOMI_USER_ID: "synthetic-user",
+    XIAOMI_PASS_TOKEN: "synthetic-pass-token",
+  });
+  const worker = createWorker({ fetchImpl });
+  const status = await callMcp(worker, env, {
+    jsonrpc: "2.0",
+    id: 74,
+    method: "tools/call",
+    params: { name: "health_login_status", arguments: {} },
+  });
+
+  const value = JSON.parse(status.json.result.content[0].text);
+  assert.deepEqual(value, {
+    logged_in: true,
+    method: "pass_token",
+    user_id: "account-user",
+    session_valid: true,
+  });
+  const stored = JSON.parse(await kv.get(TOKEN_KEY));
+  assert.equal(stored.auth_method, "pass_token");
+  assert.equal("pass_token" in stored, false);
+  assert.doesNotMatch(JSON.stringify({ value, stored }), /synthetic-pass-token/);
+  assert.equal(fetchImpl.accountCalls.length, 1);
+});
+
+test("passToken session survives a Worker restart and serves self health data", async () => {
+  const kv = new MemoryKv();
+  const fetchImpl = passTokenSessionMock({
+    healthRoute: (url, options, params) => ({
+      code: 0,
+      result: {
+        data_list: [{ time: 1_787_558_400, value: JSON.stringify({ [params.key]: 1 }) }],
+        has_more: false,
+      },
+    }),
+  });
+  const env = envWithKv(kv, {
+    XIAOMI_USER_ID: "synthetic-user",
+    XIAOMI_PASS_TOKEN: "synthetic-pass-token",
+  });
+  const firstWorker = createWorker({ fetchImpl });
+  await callMcp(firstWorker, env, {
+    jsonrpc: "2.0",
+    id: 75,
+    method: "tools/call",
+    params: { name: "health_login_status", arguments: {} },
+  });
+
+  const restartedWorker = createWorker({ fetchImpl });
+  for (const name of ["health_steps", "health_sleep", "health_heart"]) {
+    const result = await callMcp(restartedWorker, env, {
+      jsonrpc: "2.0",
+      id: name,
+      method: "tools/call",
+      params: { name, arguments: { target: "self", days: 1 } },
+    });
+    const value = JSON.parse(result.json.result.content[0].text);
+    assert.equal(value.target, "self");
+    assert.equal(value.data.length, 1);
+  }
+  assert.equal(fetchImpl.accountCalls.length, 1);
+  assert.equal(fetchImpl.healthCalls.length, 3);
+});
+
+test("an expired health session is renewed from passToken secrets and retried", async () => {
+  const kv = new MemoryKv({
+    [TOKEN_KEY]: JSON.stringify(tokenRecord({ auth_state: "expired", auth_method: "pass_token" })),
+  });
+  const fetchImpl = passTokenSessionMock({
+    healthRoute: {
+      code: 0,
+      result: {
+        data_list: [{ time: 1_787_558_400, value: '{"steps":1234}' }],
+        has_more: false,
+      },
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv, {
+    XIAOMI_USER_ID: "synthetic-user",
+    XIAOMI_PASS_TOKEN: "synthetic-pass-token",
+  }), {
+    jsonrpc: "2.0",
+    id: 76,
+    method: "tools/call",
+    params: { name: "health_steps", arguments: { target: "self", days: 1 } },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.data[0].steps, 1234);
+  assert.equal(fetchImpl.accountCalls.length, 1);
+  assert.equal(JSON.parse(await kv.get(TOKEN_KEY)).auth_state, "valid");
+});
+
+test("an invalid passToken returns a safe login status error", async () => {
+  const kv = new MemoryKv();
+  const fetchImpl = passTokenSessionMock({ serviceLoginCode: 70036 });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv, {
+    XIAOMI_USER_ID: "synthetic-user",
+    XIAOMI_PASS_TOKEN: "synthetic-pass-token",
+  }), {
+    jsonrpc: "2.0",
+    id: 77,
+    method: "tools/call",
+    params: { name: "health_login_status", arguments: {} },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.logged_in, false);
+  assert.equal(value.method, "pass_token");
+  assert.match(value.message, /passToken 无效或已过期/);
+  assert.doesNotMatch(JSON.stringify(result.json), /synthetic-pass-token/);
+});
+
+test("a health API 401 refreshes the passToken session before retrying", async () => {
+  const kv = new MemoryKv({
+    [TOKEN_KEY]: JSON.stringify(tokenRecord({ auth_method: "pass_token" })),
+  });
+  let healthAttempts = 0;
+  const fetchImpl = passTokenSessionMock({
+    healthRoute: () => {
+      healthAttempts += 1;
+      if (healthAttempts === 1) return new Response("unauthorized", { status: 401 });
+      return {
+        code: 0,
+        result: {
+          data_list: [{ time: 1_787_558_400, value: '{"steps":1234}' }],
+          has_more: false,
+        },
+      };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv, {
+    XIAOMI_USER_ID: "synthetic-user",
+    XIAOMI_PASS_TOKEN: "synthetic-pass-token",
+  }), {
+    jsonrpc: "2.0",
+    id: 78,
+    method: "tools/call",
+    params: { name: "health_steps", arguments: { target: "self", days: 1 } },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.data[0].steps, 1234);
+  assert.equal(fetchImpl.accountCalls.length, 1);
+  assert.equal(healthAttempts, 2);
+});
+
+test("a health API region error is reported without exposing the Xiaomi response", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": {
+      code: 40001,
+      message: "region cn is unavailable for synthetic-account",
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 79,
+    method: "tools/call",
+    params: { name: "health_steps", arguments: { target: "self", days: 1 } },
+  });
+  assert.equal(result.json.result.isError, true);
+  assert.match(result.json.result.content[0].text, /地区不匹配/);
+  assert.doesNotMatch(JSON.stringify(result.json), /synthetic-account/);
+});
+
 test("a Xiaomi 401 marks the stored credential expired", async () => {
   const kv = new MemoryKv({
     [TOKEN_KEY]: JSON.stringify(tokenRecord()),
@@ -523,7 +755,8 @@ test("QR start and poll store refreshed credentials without returning them", asy
 
   const stored = JSON.parse(await kv.get(TOKEN_KEY));
   assert.equal(stored.service_token, "new-service-secret");
-  assert.equal(stored.pass_token, "new-pass-secret");
+  assert.equal("pass_token" in stored, false);
+  assert.equal(stored.auth_method, "qr");
   assert.equal(stored.auth_state, "valid");
   assert.doesNotMatch(
     JSON.stringify({ started: started.json, polled: polled.json }),

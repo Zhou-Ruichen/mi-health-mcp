@@ -1,5 +1,6 @@
 import {
   buildEncryptedParams,
+  bytesToBase64,
   decryptResponse,
 } from "./crypto.js";
 
@@ -7,6 +8,7 @@ export const TOKEN_KEY = "mi_fitness_token";
 export const LOGIN_SESSION_KEY = "mi_fitness_login_session";
 
 const XIAOMI_QR_LOGIN_URL = "https://account.xiaomi.com/longPolling/loginUrl";
+const XIAOMI_SERVICE_LOGIN_URL = "https://account.xiaomi.com/pass/serviceLogin";
 const STS_HEALTH_URL = "https://sts-hlth.io.mi.com/healthapp/sts";
 const HEALTH_API_BASE = "https://hlth.io.mi.com";
 const SERVICE_SID = "miothealth";
@@ -148,6 +150,10 @@ function authFailure(code, message) {
   return /auth|token|login|credential|expired|鉴权|认证|登录|过期|失效/i.test(message);
 }
 
+function healthRegionMismatch(message) {
+  return /region|地区|区域|country/i.test(message);
+}
+
 function apiMessage(result) {
   for (const key of ["message", "msg", "desc", "description"]) {
     if (typeof result?.[key] === "string" && result[key].trim()) {
@@ -161,14 +167,21 @@ export async function loadToken(env) {
   const raw = await requireKv(env).get(TOKEN_KEY);
   if (!raw) return null;
   try {
-    return JSON.parse(raw);
+    const token = JSON.parse(raw);
+    if (Object.hasOwn(token, "pass_token")) {
+      const { pass_token, ...withoutPassToken } = token;
+      await saveToken(env, withoutPassToken);
+      return withoutPassToken;
+    }
+    return token;
   } catch {
     throw new XiaomiError("KV 中的登录凭证损坏，请重新扫码登录");
   }
 }
 
 async function saveToken(env, token) {
-  await requireKv(env).put(TOKEN_KEY, JSON.stringify(token));
+  const { pass_token, ...withoutPassToken } = token;
+  await requireKv(env).put(TOKEN_KEY, JSON.stringify(withoutPassToken));
 }
 
 export async function markTokenExpired(env, reason) {
@@ -205,28 +218,194 @@ export async function getAuthStatus(env) {
     last_checked_at: token.last_checked_at || null,
     message:
       token.auth_state === "expired"
-        ? "凭证已过期，请重新扫码登录"
+        ? hasPassTokenConfiguration(env)
+          ? "缓存会话已过期，查询时会使用已配置的 passToken 换取新会话"
+          : "凭证已过期，请重新扫码登录"
         : complete
           ? "凭证已就绪"
           : "凭证不完整，请重新扫码登录",
   };
 }
 
-async function requireActiveToken(env) {
+export async function getLoginStatus(env, fetchImpl = fetch) {
   const token = await loadToken(env);
-  if (!token?.service_token || !token?.ssecurity) {
-    throw new XiaomiAuthError("尚未登录，请先调用 health_login_start", {
+  if (token?.service_token && token?.ssecurity && token.auth_state !== "expired") {
+    return {
+      logged_in: true,
+      method: token.auth_method || "qr",
+      user_id: token.user_id || null,
+      session_valid: true,
+    };
+  }
+  if (!hasPassTokenConfiguration(env)) {
+    return {
+      logged_in: false,
+      method: null,
+      user_id: token?.user_id || null,
+      session_valid: false,
+      message: "未配置 XIAOMI_USER_ID/XIAOMI_PASS_TOKEN；可使用 health_login_start 扫码登录",
+    };
+  }
+  try {
+    const refreshed = await exchangePassTokenSession(env, fetchImpl);
+    return {
+      logged_in: true,
+      method: "pass_token",
+      user_id: refreshed.user_id,
+      session_valid: true,
+    };
+  } catch (error) {
+    return {
+      logged_in: false,
+      method: "pass_token",
+      user_id: null,
+      session_valid: false,
+      message: String(error?.message || "miothealth session 获取失败"),
+    };
+  }
+}
+
+export function hasPassTokenConfiguration(env) {
+  return Boolean(env?.XIAOMI_USER_ID || env?.XIAOMI_PASS_TOKEN);
+}
+
+function passTokenCredentials(env) {
+  const userId = typeof env?.XIAOMI_USER_ID === "string"
+    ? env.XIAOMI_USER_ID.trim()
+    : "";
+  const passToken = typeof env?.XIAOMI_PASS_TOKEN === "string"
+    ? env.XIAOMI_PASS_TOKEN
+    : "";
+  if (!userId && !passToken) return null;
+  if (!userId || !passToken) {
+    throw new XiaomiAuthError(
+      "Cloudflare Secret 配置不完整：XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 必须同时设置",
+      { authExpired: false },
+    );
+  }
+  return { userId, passToken };
+}
+
+async function clientSign(nonce, ssecurity) {
+  const source = new TextEncoder().encode(`nonce=${nonce || ""}&${ssecurity}`);
+  return bytesToBase64(
+    new Uint8Array(await globalThis.crypto.subtle.digest("SHA-1", source)),
+  );
+}
+
+export async function exchangePassTokenSession(
+  env,
+  fetchImpl = fetch,
+  now = Date.now(),
+) {
+  const credentials = passTokenCredentials(env);
+  if (!credentials) {
+    throw new XiaomiAuthError(
+      "Cloudflare Secret 未配置：请设置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN，或使用 health_login_start 扫码登录",
+      { authExpired: false },
+    );
+  }
+  const deviceId = randomDeviceId();
+  const url = new URL(XIAOMI_SERVICE_LOGIN_URL);
+  url.searchParams.set("_json", "true");
+  url.searchParams.set("sid", SERVICE_SID);
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        "User-Agent": LOGIN_USER_AGENT,
+        Cookie: cookieHeader({
+          userId: credentials.userId,
+          passToken: credentials.passToken,
+          deviceId,
+        }),
+      },
+    });
+  } catch {
+    throw new XiaomiAuthError("Xiaomi Account serviceLogin 请求失败", {
       authExpired: false,
     });
   }
-  if (token.auth_state === "expired") {
-    throw new XiaomiAuthError("凭证已过期，请重新扫码登录");
+  const body = await readTextLimited(response);
+  if (response.status === 401 || response.status === 403) {
+    throw new XiaomiAuthError("passToken 无效或已过期", { authExpired: false });
   }
+  if (!response.ok) {
+    throw new XiaomiApiError(`Xiaomi Account serviceLogin 失败（HTTP ${response.status}）`);
+  }
+  const data = parseMiResponse(body);
+  if (Number(data?.code ?? 0) !== 0) {
+    throw new XiaomiAuthError(
+      `passToken 无效或已过期（Xiaomi Account code=${Number(data.code)}）`,
+      { authExpired: false },
+    );
+  }
+  if (!data.ssecurity || !data.userId || !data.location) {
+    throw new XiaomiAuthError("miothealth session 获取失败：serviceLogin 响应不完整", {
+      authExpired: false,
+    });
+  }
+
+  const location = assertXiaomiUrl(data.location);
+  location.searchParams.set("clientSign", await clientSign(data.nonce, data.ssecurity));
+  const cookies = {
+    userId: String(data.userId),
+    passToken: credentials.passToken,
+    deviceId,
+  };
+  let extracted;
+  try {
+    extracted = await extractServiceToken(
+      fetchImpl,
+      location.toString(),
+      cookies,
+      "miothealth session 获取失败：未能取得 serviceToken",
+    );
+  } catch (error) {
+    if (error instanceof XiaomiError) throw error;
+    throw new XiaomiAuthError("miothealth session 获取失败", { authExpired: false });
+  }
+  const updatedAt = new Date(now).toISOString();
+  const token = {
+    user_id: String(data.userId),
+    c_user_id: data.cUserId || "",
+    service_token: extracted.serviceToken,
+    ssecurity: data.ssecurity,
+    device_id: deviceId,
+    auth_method: "pass_token",
+    auth_state: "valid",
+    updated_at: updatedAt,
+    last_checked_at: null,
+    last_error: null,
+  };
+  await saveToken(env, token);
   return token;
 }
 
-async function requireSelfToken(env) {
-  const token = await requireActiveToken(env);
+async function requireActiveToken(env, fetchImpl = fetch) {
+  const token = await loadToken(env);
+  if (token?.service_token && token?.ssecurity && token.auth_state !== "expired") {
+    return token;
+  }
+  if (hasPassTokenConfiguration(env)) {
+    return exchangePassTokenSession(env, fetchImpl);
+  }
+  if (!token?.service_token || !token?.ssecurity) {
+    throw new XiaomiAuthError(
+      "尚未登录，且未配置 XIAOMI_USER_ID/XIAOMI_PASS_TOKEN；请设置 Cloudflare Secret 或调用 health_login_start",
+      { authExpired: false },
+    );
+  }
+  throw new XiaomiAuthError(
+    "凭证已过期且未配置 XIAOMI_USER_ID/XIAOMI_PASS_TOKEN，请重新扫码登录",
+    { authExpired: false },
+  );
+}
+
+async function requireSelfToken(env, fetchImpl = fetch) {
+  const token = await requireActiveToken(env, fetchImpl);
   if (!token.user_id) {
     throw new XiaomiAuthError("登录信息缺少 user_id，请重新扫码登录", {
       authExpired: false,
@@ -285,6 +464,11 @@ async function encryptedRequest(fetchImpl, token, method, path, params) {
   const code = Number(result.code ?? -1);
   if (code !== 0) {
     const message = apiMessage(result);
+    if (healthRegionMismatch(message)) {
+      throw new XiaomiApiError("小米健康 API 地区不匹配", {
+        code: Number.isFinite(code) ? code : null,
+      });
+    }
     throw new XiaomiApiError(
       `小米接口错误（code=${Number.isFinite(code) ? code : "unknown"}）：${message}`,
       {
@@ -311,7 +495,7 @@ function normalizeRelativeUid(value) {
 }
 
 async function listRelatives(env, fetchImpl) {
-  const token = await requireActiveToken(env);
+  const token = await requireActiveToken(env, fetchImpl);
   const response = await encryptedRequest(
     fetchImpl,
     token,
@@ -354,8 +538,8 @@ export async function getRelatives(env, fetchImpl = fetch) {
   });
 }
 
-export async function getHealthMe(env) {
-  const token = await requireSelfToken(env);
+export async function getHealthMe(env, fetchImpl = fetch) {
+  const token = await requireSelfToken(env, fetchImpl);
   return {
     logged_in: true,
     user_id: token.user_id,
@@ -425,7 +609,7 @@ function latestResponse(itemsByMetric, target) {
 
 export async function getLatestHealth(env, target, fetchImpl = fetch, now = Date.now()) {
   if (target.target === "self") {
-    const token = await requireSelfToken(env);
+    const token = await requireSelfToken(env, fetchImpl);
     const { start, end } = cstTodayWindow(now, 1);
     const [sleep, heart_rate, steps] = await Promise.all(
       ["sleep", "heart_rate", "steps"].map((key) =>
@@ -502,7 +686,7 @@ export async function getHealthSeries(
 ) {
   const { start, end } = cstTodayWindow(now, days);
   if (target.target === "self") {
-    const token = await requireSelfToken(env);
+    const token = await requireSelfToken(env, fetchImpl);
     const items = await getSelfFitnessItems(
       env,
       token,
@@ -640,7 +824,12 @@ async function loadLoginSession(env) {
   }
 }
 
-async function extractServiceToken(fetchImpl, location, cookies) {
+async function extractServiceToken(
+  fetchImpl,
+  location,
+  cookies,
+  failureMessage = "未能取得 serviceToken",
+) {
   const url = assertXiaomiUrl(location);
   const response = await fetchImpl(url, {
     method: "GET",
@@ -650,6 +839,10 @@ async function extractServiceToken(fetchImpl, location, cookies) {
       Cookie: cookieHeader(cookies),
     },
   });
+  if (response.status >= 400) {
+    await response.body?.cancel();
+    throw new XiaomiApiError(`${failureMessage}（HTTP ${response.status}）`);
+  }
   await response.body?.cancel();
   const responseCookies = extractCookies(response.headers);
   const redirectLocation = response.headers.get("location");
@@ -663,7 +856,7 @@ async function extractServiceToken(fetchImpl, location, cookies) {
     }
   }
   if (!serviceToken) {
-    throw new XiaomiApiError("扫码成功，但未能取得 serviceToken");
+    throw new XiaomiApiError(failureMessage);
   }
   return { serviceToken, cookies: { ...cookies, ...responseCookies } };
 }
@@ -769,8 +962,8 @@ export async function pollQrLogin(env, fetchImpl = fetch, now = Date.now()) {
     c_user_id: data.cUserId || "",
     service_token: extracted.serviceToken,
     ssecurity: data.ssecurity,
-    pass_token: data.passToken || "",
     device_id: session.device_id,
+    auth_method: "qr",
     auth_state: "valid",
     updated_at: updatedAt,
     last_checked_at: null,

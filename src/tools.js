@@ -2,10 +2,13 @@ import {
   getAuthStatus,
   getHealthMe,
   getHealthSeries,
+  getLoginStatus,
   getLatestHealth,
   getRelatives,
+  hasPassTokenConfiguration,
   markTokenExpired,
   pollQrLogin,
+  exchangePassTokenSession,
   startQrLogin,
 } from "./xiaomi.js";
 
@@ -89,12 +92,17 @@ export const TOOLS = [
   },
   {
     name: "health_me",
-    description: "查看当前扫码登录的小米账号状态和 user_id，不会返回任何认证凭证。未登录或凭证不完整时提示先运行登录工具。",
+    description: "查看当前登录的小米账号状态和 user_id，不会返回任何认证凭证。未登录或凭证不完整时提示配置 passToken Secret 或运行登录工具。",
     inputSchema: emptySchema,
   },
   {
     name: "health_relatives",
     description: "列出当前登录账号可查询的亲友。返回 relative_uid 和备注；查询亲友健康数据时将 target 设为 relative 并提供该 relative_uid。",
+    inputSchema: emptySchema,
+  },
+  {
+    name: "health_login_status",
+    description: "查看当前健康 API 会话状态。配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 后会自动换取 miothealth 会话；不会返回任何 token 或 cookie。",
     inputSchema: emptySchema,
   },
   {
@@ -133,12 +141,16 @@ function parseTarget(args) {
   return { target, relative_uid: String(relativeUid) };
 }
 
-async function withAuthTracking(env, operation) {
+async function withAuthTracking(env, fetchImpl, operation) {
   try {
     return await operation();
   } catch (error) {
     if (error?.authExpired) {
       await markTokenExpired(env, error.message);
+      if (hasPassTokenConfiguration(env)) {
+        await exchangePassTokenSession(env, fetchImpl);
+        return operation();
+      }
       throw new Error(`小米凭证已过期，请重新扫码登录：${error.message}`);
     }
     throw error;
@@ -157,27 +169,29 @@ export async function callTool(
 
   switch (name) {
     case "health_latest":
-      return withAuthTracking(env, () =>
+      return withAuthTracking(env, fetchImpl, () =>
         getLatestHealth(env, parseTarget(args), fetchImpl),
       );
     case "health_sleep":
-      return withAuthTracking(env, () =>
+      return withAuthTracking(env, fetchImpl, () =>
         getHealthSeries(env, "sleep", parseDays(args), parseTarget(args), fetchImpl),
       );
     case "health_heart":
-      return withAuthTracking(env, () =>
+      return withAuthTracking(env, fetchImpl, () =>
         getHealthSeries(env, "heart_rate", parseDays(args), parseTarget(args), fetchImpl),
       );
     case "health_steps":
-      return withAuthTracking(env, () =>
+      return withAuthTracking(env, fetchImpl, () =>
         getHealthSeries(env, "steps", parseDays(args), parseTarget(args), fetchImpl),
       );
     case "health_auth_status":
       return getAuthStatus(env);
     case "health_me":
-      return withAuthTracking(env, () => getHealthMe(env));
+      return withAuthTracking(env, fetchImpl, () => getHealthMe(env, fetchImpl));
     case "health_relatives":
-      return withAuthTracking(env, () => getRelatives(env, fetchImpl));
+      return withAuthTracking(env, fetchImpl, () => getRelatives(env, fetchImpl));
+    case "health_login_status":
+      return getLoginStatus(env, fetchImpl);
     case "health_login_start":
       return startQrLogin(env, fetchImpl);
     case "health_login_poll":
