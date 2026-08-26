@@ -1,7 +1,9 @@
 import {
   getAuthStatus,
+  getHealthMe,
   getHealthSeries,
   getLatestHealth,
+  getRelatives,
   markTokenExpired,
   pollQrLogin,
   startQrLogin,
@@ -13,9 +15,40 @@ const emptySchema = {
   additionalProperties: false,
 };
 
+const targetProperties = {
+  target: {
+    type: "string",
+    enum: ["self", "relative"],
+    default: "self",
+    description: "查询本人时使用 self（默认）；查询亲友、家人或指定用户时使用 relative。",
+  },
+  relative_uid: {
+    oneOf: [
+      { type: "string", pattern: "^[0-9]+$" },
+      { type: "integer" },
+    ],
+    description: "target=relative 时必填。先调用 health_relatives 获取。",
+  },
+};
+
+const targetSchema = {
+  type: "object",
+  properties: {
+    ...targetProperties,
+  },
+  allOf: [
+    {
+      if: { properties: { target: { const: "relative" } }, required: ["target"] },
+      then: { required: ["relative_uid"] },
+    },
+  ],
+  additionalProperties: false,
+};
+
 const daysSchema = {
   type: "object",
   properties: {
+    ...targetProperties,
     days: {
       type: "integer",
       minimum: 1,
@@ -24,33 +57,44 @@ const daysSchema = {
       description: "查询天数，默认 7，最多 30。",
     },
   },
+  allOf: targetSchema.allOf,
   additionalProperties: false,
 };
 
 export const TOOLS = [
   {
     name: "health_latest",
-    description: "查询第一位亲友最新的睡眠、心率和步数快照；仅返回已有数据。",
-    inputSchema: emptySchema,
+    description: "查询本人或指定亲友最新的睡眠、心率和步数快照。用户说“我、我的、本人”时 target=self；说“亲友、家人、指定用户”时 target=relative 并提供 relative_uid。",
+    inputSchema: targetSchema,
   },
   {
     name: "health_sleep",
-    description: "查询第一位亲友的每日睡眠序列。",
+    description: "查询本人或指定亲友最近的睡眠记录。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
     inputSchema: daysSchema,
   },
   {
     name: "health_heart",
-    description: "查询第一位亲友的每日心率序列。",
+    description: "查询本人或指定亲友最近的心率记录。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
     inputSchema: daysSchema,
   },
   {
     name: "health_steps",
-    description: "查询第一位亲友的每日步数序列。",
+    description: "查询本人或指定亲友最近的步数记录。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
     inputSchema: daysSchema,
   },
   {
     name: "health_auth_status",
     description: "查看小米凭证是否存在、用户 ID、状态和最后更新时间；不会返回凭证本体。",
+    inputSchema: emptySchema,
+  },
+  {
+    name: "health_me",
+    description: "查看当前扫码登录的小米账号状态和 user_id，不会返回任何认证凭证。未登录或凭证不完整时提示先运行登录工具。",
+    inputSchema: emptySchema,
+  },
+  {
+    name: "health_relatives",
+    description: "列出当前登录账号可查询的亲友。返回 relative_uid 和备注；查询亲友健康数据时将 target 设为 relative 并提供该 relative_uid。",
     inputSchema: emptySchema,
   },
   {
@@ -71,6 +115,22 @@ function parseDays(args) {
     throw new Error("days 必须是 1 到 30 的整数");
   }
   return args.days;
+}
+
+function parseTarget(args) {
+  const target = args.target === undefined ? "self" : args.target;
+  if (target !== "self" && target !== "relative") {
+    throw new Error("target 必须是 self 或 relative");
+  }
+  if (target === "self") return { target };
+  const relativeUid = args.relative_uid;
+  const validUid =
+    (typeof relativeUid === "number" && Number.isInteger(relativeUid)) ||
+    (typeof relativeUid === "string" && /^\d+$/.test(relativeUid));
+  if (!validUid) {
+    throw new Error("target=relative 时必须提供有效的 relative_uid；请先调用 health_relatives");
+  }
+  return { target, relative_uid: String(relativeUid) };
 }
 
 async function withAuthTracking(env, operation) {
@@ -97,21 +157,27 @@ export async function callTool(
 
   switch (name) {
     case "health_latest":
-      return withAuthTracking(env, () => getLatestHealth(env, fetchImpl));
+      return withAuthTracking(env, () =>
+        getLatestHealth(env, parseTarget(args), fetchImpl),
+      );
     case "health_sleep":
       return withAuthTracking(env, () =>
-        getHealthSeries(env, "sleep", parseDays(args), fetchImpl),
+        getHealthSeries(env, "sleep", parseDays(args), parseTarget(args), fetchImpl),
       );
     case "health_heart":
       return withAuthTracking(env, () =>
-        getHealthSeries(env, "heart_rate", parseDays(args), fetchImpl),
+        getHealthSeries(env, "heart_rate", parseDays(args), parseTarget(args), fetchImpl),
       );
     case "health_steps":
       return withAuthTracking(env, () =>
-        getHealthSeries(env, "steps", parseDays(args), fetchImpl),
+        getHealthSeries(env, "steps", parseDays(args), parseTarget(args), fetchImpl),
       );
     case "health_auth_status":
       return getAuthStatus(env);
+    case "health_me":
+      return withAuthTracking(env, () => getHealthMe(env));
+    case "health_relatives":
+      return withAuthTracking(env, () => getRelatives(env, fetchImpl));
     case "health_login_start":
       return startQrLogin(env, fetchImpl);
     case "health_login_poll":

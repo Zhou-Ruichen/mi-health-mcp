@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-mi-health-mcp 把小米运动健康的亲友数据，包括睡眠、心率和步数，通过 MCP 协议暴露给 RikkaHub 等 LLM 客户端。服务运行在 Cloudflare Workers 上，无需自建服务器，可在 Cloudflare 免费额度内使用。本项目基于 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 的接口逆向成果改写为 Cloudflare Worker + MCP 服务，感谢上游。
+mi-health-mcp 把当前登录小米账号本人及已授权亲友的睡眠、心率和步数，通过 MCP 协议暴露给 RikkaHub 等 LLM 客户端。服务运行在 Cloudflare Workers 上，无需自建服务器，可在 Cloudflare 免费额度内使用。本项目基于 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 的接口逆向成果改写为 Cloudflare Worker + MCP 服务，感谢上游。
 
 ## 一键部署
 
@@ -69,9 +69,27 @@ KV binding 名必须保持为 `MI_HEALTH_KV`。
 2. 使用任意二维码工具把 `loginUrl` 渲染成二维码。
 3. 用小米运动健康 App 扫码并确认登录。
 4. 客户端轮调 `health_login_poll`，直到返回 `success`。
-5. 登录成功后，使用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询数据。
+5. 登录成功后，使用 `health_me` 确认当前账号，再使用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询本人数据。
+6. 要查询亲友时，先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
 
-Worker 不生成二维码图片。查询时会动态读取亲友列表并使用第一项，不在代码中写死用户 ID。
+Worker 不生成二维码图片。健康查询默认 `target: "self"`，使用扫码登录账号的本人数据接口；不会把登录账号当作亲友，也不会自动选择亲友列表的第一项。
+
+### MCP tools
+
+- `health_me`：返回当前登录状态和 `user_id`，不返回凭证。
+- `health_relatives`：列出可查询亲友的 `relative_uid` 和备注。
+- `health_latest`：查询最新的睡眠、心率和步数。
+- `health_sleep`、`health_heart`、`health_steps`：查询最近 1 至 30 天的对应记录。
+
+查询本人时省略 `target` 或显式传入 `{"target":"self"}`。查询亲友时必须传入：
+
+```json
+{
+  "target": "relative",
+  "relative_uid": "...",
+  "days": 7
+}
+```
 
 ## 使用边界
 

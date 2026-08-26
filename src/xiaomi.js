@@ -14,6 +14,7 @@ const SERVICE_SID = "miothealth";
 const RELATIVES_LIST_PATH = "/app/v1/relatives/get_relative_list";
 const RELATIVES_LATEST_PATH = "/app/v1/relatives/get_latest_data";
 const RELATIVES_AGGREGATED_PATH = "/app/v1/relatives/get_aggregated_data";
+const SELF_FITNESS_BY_TIME_PATH = "/app/v1/data/get_fitness_data_by_time";
 
 const API_USER_AGENT = "Android-12-3.53.1-vivo-V2284A";
 const LOGIN_USER_AGENT =
@@ -224,6 +225,16 @@ async function requireActiveToken(env) {
   return token;
 }
 
+async function requireSelfToken(env) {
+  const token = await requireActiveToken(env);
+  if (!token.user_id) {
+    throw new XiaomiAuthError("登录信息缺少 user_id，请重新扫码登录", {
+      authExpired: false,
+    });
+  }
+  return token;
+}
+
 async function encryptedRequest(fetchImpl, token, method, path, params) {
   const encrypted = await buildEncryptedParams(
     method,
@@ -291,7 +302,15 @@ function responseResult(response) {
     : {};
 }
 
-async function firstRelative(env, fetchImpl) {
+function normalizeRelativeUid(value) {
+  const validUid =
+    (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) ||
+    (typeof value === "string" && /^\d+$/.test(value));
+  if (!validUid) throw new XiaomiApiError("relative_uid 必须是有效的小米用户 ID");
+  return String(value);
+}
+
+async function listRelatives(env, fetchImpl) {
   const token = await requireActiveToken(env);
   const response = await encryptedRequest(
     fetchImpl,
@@ -300,17 +319,49 @@ async function firstRelative(env, fetchImpl) {
     RELATIVES_LIST_PATH,
   );
   const relatives = responseResult(response).relative_list;
-  if (!Array.isArray(relatives) || relatives.length === 0) {
-    throw new XiaomiApiError("亲友列表为空");
+  return { token, relatives: Array.isArray(relatives) ? relatives : [] };
+}
+
+async function requireRelative(env, relativeUid, fetchImpl) {
+  const normalizedUid = normalizeRelativeUid(relativeUid);
+  const { token, relatives } = await listRelatives(env, fetchImpl);
+  const relative = relatives.find((item) => {
+    try {
+      return normalizeRelativeUid(item?.relative_uid) === normalizedUid;
+    } catch {
+      return false;
+    }
+  });
+  if (!relative) {
+    throw new XiaomiApiError(`未找到 relative_uid=${normalizedUid} 的亲友，请先调用 health_relatives`);
   }
-  const relativeUid = relatives[0]?.relative_uid;
-  const validUid =
-    (typeof relativeUid === "number" && Number.isFinite(relativeUid)) ||
-    (typeof relativeUid === "string" && /^\d+$/.test(relativeUid));
-  if (!validUid) {
-    throw new XiaomiApiError("亲友列表第一项缺少有效 UID");
-  }
-  return { token, relativeUid };
+  return { token, relativeUid: normalizedUid };
+}
+
+export async function getRelatives(env, fetchImpl = fetch) {
+  const { relatives } = await listRelatives(env, fetchImpl);
+  return relatives.flatMap((item) => {
+    try {
+      const relative_uid = normalizeRelativeUid(item?.relative_uid);
+      const result = { relative_uid, relative_note: String(item?.relative_note || "") };
+      if (typeof item?.nickname === "string" && item.nickname) {
+        result.nickname = item.nickname;
+      }
+      return [result];
+    } catch {
+      return [];
+    }
+  });
+}
+
+export async function getHealthMe(env) {
+  const token = await requireSelfToken(env);
+  return {
+    logged_in: true,
+    user_id: token.user_id,
+    status: token.auth_state || "valid",
+    updated_at: token.updated_at || null,
+  };
 }
 
 function normalizeLatestItem(item) {
@@ -321,8 +372,77 @@ function normalizeLatestItem(item) {
   return { time: Number(item?.time || 0), value };
 }
 
-export async function getLatestHealth(env, fetchImpl = fetch) {
-  const { token, relativeUid } = await firstRelative(env, fetchImpl);
+async function getSelfFitnessItems(env, token, key, start, end, fetchImpl) {
+  const items = [];
+  const seenNextKeys = new Set();
+  let nextKey;
+  while (true) {
+    const params = { start_time: start, end_time: end, key };
+    if (nextKey) params.next_key = nextKey;
+    const response = await encryptedRequest(
+      fetchImpl,
+      token,
+      "POST",
+      SELF_FITNESS_BY_TIME_PATH,
+      params,
+    );
+    const result = responseResult(response);
+    if (Array.isArray(result.data_list)) items.push(...result.data_list);
+    if (!result.has_more) return items;
+    if (typeof result.next_key !== "string" || !result.next_key || seenNextKeys.has(result.next_key)) {
+      throw new XiaomiApiError("小米本人健康数据分页响应异常");
+    }
+    seenNextKeys.add(result.next_key);
+    nextKey = result.next_key;
+  }
+}
+
+function selectLatest(items) {
+  return items.reduce((latest, item) =>
+    Number(item?.time || 0) > Number(latest?.time || 0) ? item : latest,
+  null);
+}
+
+function latestResponse(itemsByMetric, target) {
+  const data = {};
+  let latestDataTime = 0;
+  for (const [metric, items] of Object.entries(itemsByMetric)) {
+    const item = selectLatest(items);
+    if (!item) continue;
+    data[metric] = normalizeLatestItem(item);
+    latestDataTime = Math.max(latestDataTime, Number(item.time || 0));
+  }
+  return {
+    ...target,
+    latest_data_time: latestDataTime,
+    data,
+    message:
+      Object.keys(data).length === 0
+        ? "暂无睡眠、心率或步数数据（设备可能未佩戴或尚未同步）"
+        : undefined,
+  };
+}
+
+export async function getLatestHealth(env, target, fetchImpl = fetch, now = Date.now()) {
+  if (target.target === "self") {
+    const token = await requireSelfToken(env);
+    const { start, end } = cstTodayWindow(now, 1);
+    const [sleep, heart_rate, steps] = await Promise.all(
+      ["sleep", "heart_rate", "steps"].map((key) =>
+        getSelfFitnessItems(env, token, key, start, end, fetchImpl),
+      ),
+    );
+    return latestResponse(
+      { sleep, heart_rate, steps },
+      { target: "self", user_id: token.user_id || null },
+    );
+  }
+
+  const { token, relativeUid } = await requireRelative(
+    env,
+    target.relative_uid,
+    fetchImpl,
+  );
   const response = await encryptedRequest(
     fetchImpl,
     token,
@@ -332,27 +452,16 @@ export async function getLatestHealth(env, fetchImpl = fetch) {
   );
   const result = responseResult(response);
   const items = Array.isArray(result.data_list) ? result.data_list : [];
-  const selected = {};
-  const outputNames = {
-    sleep: "sleep",
-    heart_rate: "heart_rate",
-    steps: "steps",
-  };
+  const itemsByMetric = { sleep: [], heart_rate: [], steps: [] };
   for (const item of items) {
-    if (outputNames[item?.key]) {
-      selected[outputNames[item.key]] = normalizeLatestItem(item);
-    }
+    if (itemsByMetric[item?.key]) itemsByMetric[item.key].push(item);
   }
-
-  return {
+  const output = latestResponse(itemsByMetric, {
+    target: "relative",
     relative_uid: relativeUid,
-    latest_data_time: Number(result.latest_data_time || 0),
-    data: selected,
-    message:
-      Object.keys(selected).length === 0
-        ? "暂无睡眠、心率或步数数据（设备可能未佩戴或尚未同步）"
-        : undefined,
-  };
+  });
+  output.latest_data_time = Number(result.latest_data_time || output.latest_data_time);
+  return output;
 }
 
 function cstTodayWindow(now, days) {
@@ -387,11 +496,42 @@ export async function getHealthSeries(
   env,
   metric,
   days,
+  target,
   fetchImpl = fetch,
   now = Date.now(),
 ) {
-  const { token, relativeUid } = await firstRelative(env, fetchImpl);
   const { start, end } = cstTodayWindow(now, days);
+  if (target.target === "self") {
+    const token = await requireSelfToken(env);
+    const items = await getSelfFitnessItems(
+      env,
+      token,
+      metric,
+      start,
+      end,
+      fetchImpl,
+    );
+    const data = items
+      .map(normalizeSeriesItem)
+      .sort((left, right) => left.time - right.time);
+    return {
+      target: "self",
+      user_id: token.user_id || null,
+      metric,
+      days,
+      data,
+      message:
+        data.length === 0
+          ? "暂无数据（设备可能未佩戴或尚未同步）"
+          : undefined,
+    };
+  }
+
+  const { token, relativeUid } = await requireRelative(
+    env,
+    target.relative_uid,
+    fetchImpl,
+  );
   const response = await encryptedRequest(
     fetchImpl,
     token,
@@ -412,6 +552,7 @@ export async function getHealthSeries(
     .sort((left, right) => left.time - right.time);
 
   return {
+    target: "relative",
     relative_uid: relativeUid,
     metric,
     days,

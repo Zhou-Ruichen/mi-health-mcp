@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   computeSignedNonce,
+  decryptData,
   encryptData,
 } from "../src/crypto.js";
 import { createWorker } from "../src/index.js";
@@ -72,11 +73,8 @@ function encryptedApiMock(routes) {
   const calls = [];
   const fetchImpl = async (input, options = {}) => {
     const url = new URL(input);
-    calls.push({ url, options });
     const route = routes[url.pathname];
     if (!route) throw new Error(`unexpected network request: ${url}`);
-    const payload = typeof route === "function" ? await route(url, options) : route;
-    if (payload instanceof Response) return payload;
 
     const form =
       options.method === "POST"
@@ -85,6 +83,13 @@ function encryptedApiMock(routes) {
     const nonce = form.get("_nonce");
     assert.ok(nonce, "encrypted Xiaomi request includes _nonce");
     const signedNonce = await computeSignedNonce(SSECURITY, nonce);
+    const encryptedData = form.get("data");
+    const params = encryptedData
+      ? JSON.parse(await decryptData(signedNonce, encryptedData))
+      : {};
+    calls.push({ url, options, params });
+    const payload = typeof route === "function" ? await route(url, options, params) : route;
+    if (payload instanceof Response) return payload;
     const ciphertext = await encryptData(
       signedNonce,
       JSON.stringify(payload),
@@ -104,6 +109,17 @@ test("MCP endpoint rejects missing and invalid Bearer tokens", async () => {
 
   const invalid = await worker.fetch(mcpRequest({ jsonrpc: "2.0", id: 1, method: "initialize" }, "wrong"), env);
   assert.equal(invalid.status, 401);
+});
+
+test("Worker health check is available without MCP authorization", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const response = await worker.fetch(new Request("https://worker.example/"), envWithKv());
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    ok: true,
+    service: "mi-health-mcp",
+    mcp_endpoint: "/mcp",
+  });
 });
 
 test("initialize, tools/list, and initialized notification follow JSON-RPC", async () => {
@@ -135,6 +151,8 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_heart",
       "health_steps",
       "health_auth_status",
+      "health_me",
+      "health_relatives",
       "health_login_start",
       "health_login_poll",
     ],
@@ -172,42 +190,65 @@ test("health_auth_status reports metadata without exposing credentials", async (
   assert.doesNotMatch(JSON.stringify(result.json), /service-token-secret|pass-token-secret|c-user-secret/);
 });
 
-test("health_latest resolves the first relative and returns only available metrics", async () => {
+test("health_me reports the current account without exposing credentials", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 31,
+    method: "tools/call",
+    params: { name: "health_me", arguments: {} },
+  });
+
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.deepEqual(value, {
+    logged_in: true,
+    user_id: "account-user",
+    status: "valid",
+    updated_at: "2026-08-24T08:00:00.000Z",
+  });
+  assert.doesNotMatch(JSON.stringify(result.json), /service-token-secret|pass-token-secret|c-user-secret/);
+});
+
+test("health_me explains how to log in when no credential is stored", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const result = await callMcp(worker, envWithKv(), {
+    jsonrpc: "2.0",
+    id: 32,
+    method: "tools/call",
+    params: { name: "health_me", arguments: {} },
+  });
+
+  assert.equal(result.json.result.isError, true);
+  assert.match(result.json.result.content[0].text, /health_login_start/);
+});
+
+test("health_latest defaults to the signed-in account and uses the self data endpoint", async () => {
   const kv = new MemoryKv({
     [TOKEN_KEY]: JSON.stringify(tokenRecord()),
   });
   const fetchImpl = encryptedApiMock({
-    "/app/v1/relatives/get_relative_list": {
-      code: 0,
-      result: {
-        relative_list: [
-          { relative_uid: 42, relative_note: "first" },
-          { relative_uid: 99, relative_note: "second" },
-        ],
-      },
-    },
-    "/app/v1/relatives/get_latest_data": {
-      code: 0,
-      result: {
-        latest_data_time: 1_787_558_400,
-        data_list: [
-          {
-            key: "sleep",
-            time: 1_787_500_800,
-            value: JSON.stringify({ total_duration: 455, sleep_score: 86 }),
-          },
-          {
-            key: "heart_rate",
-            time: 1_787_558_300,
-            value: JSON.stringify({ bpm: 72 }),
-          },
-          {
-            key: "weight",
-            time: 1_787_550_000,
-            value: "{\"weight\":52.3}",
-          },
-        ],
-      },
+    "/app/v1/data/get_fitness_data_by_time": (url, options, params) => {
+      assert.equal(options.method, "POST");
+      assert.equal(params.key === "sleep" || params.key === "heart_rate" || params.key === "steps", true);
+      return {
+        code: 0,
+        result: {
+          data_list: [
+            {
+              time: 1_787_558_400,
+              value: JSON.stringify(
+                params.key === "sleep"
+                  ? { total_duration: 455, sleep_score: 86 }
+                  : params.key === "heart_rate"
+                    ? { bpm: 72 }
+                    : { steps: 1234 },
+              ),
+            },
+          ],
+          has_more: false,
+        },
+      };
     },
   });
   const worker = createWorker({ fetchImpl });
@@ -219,27 +260,27 @@ test("health_latest resolves the first relative and returns only available metri
   });
   const value = JSON.parse(result.json.result.content[0].text);
 
-  assert.equal(value.relative_uid, 42);
+  assert.equal(value.target, "self");
+  assert.equal(value.user_id, "account-user");
   assert.equal(value.data.sleep.total_duration, 455);
   assert.equal(value.data.heart_rate.bpm, 72);
-  assert.equal("steps" in value.data, false);
-  assert.equal("weight" in value.data, false);
-  assert.equal(fetchImpl.calls.length, 2);
+  assert.equal(value.data.steps.steps, 1234);
+  assert.equal(fetchImpl.calls.length, 3);
+  assert.equal(
+    fetchImpl.calls.every((call) => call.url.pathname === "/app/v1/data/get_fitness_data_by_time"),
+    true,
+  );
   assert.doesNotMatch(JSON.stringify(result.json), /service-token-secret/);
 });
 
-test("daily series defaults to seven days, accepts empty data, and rejects over 30", async () => {
+test("self daily series defaults to seven days, accepts empty data, and rejects over 30", async () => {
   const kv = new MemoryKv({
     [TOKEN_KEY]: JSON.stringify(tokenRecord()),
   });
   const fetchImpl = encryptedApiMock({
-    "/app/v1/relatives/get_relative_list": {
+    "/app/v1/data/get_fitness_data_by_time": {
       code: 0,
-      result: { relative_list: [{ relative_uid: 42 }] },
-    },
-    "/app/v1/relatives/get_aggregated_data": {
-      code: 0,
-      result: { data_list: [] },
+      result: { data_list: [], has_more: false },
     },
   });
   const worker = createWorker({ fetchImpl });
@@ -250,6 +291,8 @@ test("daily series defaults to seven days, accepts empty data, and rejects over 
     params: { name: "health_sleep", arguments: {} },
   });
   const value = JSON.parse(valid.json.result.content[0].text);
+  assert.equal(value.target, "self");
+  assert.equal(value.user_id, "account-user");
   assert.equal(value.days, 7);
   assert.deepEqual(value.data, []);
   assert.match(value.message, /暂无数据/);
@@ -264,26 +307,127 @@ test("daily series defaults to seven days, accepts empty data, and rejects over 
   assert.match(invalid.json.result.content[0].text, /1 到 30/);
 });
 
-test("an empty relative list returns the required explicit error", async () => {
+test("self steps, sleep, and heart queries use the self data endpoint", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": (url, options, params) => {
+      assert.equal(options.method, "POST");
+      assert.equal("relative_uid" in params, false);
+      const values = {
+        steps: { steps: 1234 },
+        sleep: { duration: 455, sleep_score: 86 },
+        heart_rate: { bpm: 72 },
+      };
+      return {
+        code: 0,
+        result: {
+          data_list: [{ time: 1_787_558_400, value: JSON.stringify(values[params.key]) }],
+          has_more: false,
+        },
+      };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const cases = [
+    ["health_steps", "steps"],
+    ["health_sleep", "sleep"],
+    ["health_heart", "heart_rate"],
+  ];
+
+  for (const [name, metric] of cases) {
+    const result = await callMcp(worker, envWithKv(kv), {
+      jsonrpc: "2.0",
+      id: name,
+      method: "tools/call",
+      params: { name, arguments: { target: "self", days: 1 } },
+    });
+    const value = JSON.parse(result.json.result.content[0].text);
+    assert.equal(value.target, "self");
+    assert.equal(value.user_id, "account-user");
+    assert.equal(value.metric, metric);
+    assert.equal(value.data.length, 1);
+  }
+  assert.equal(fetchImpl.calls.length, 3);
+});
+
+test("health_relatives returns safe identifiers and a missing relative_uid is explicit", async () => {
   const kv = new MemoryKv({
     [TOKEN_KEY]: JSON.stringify(tokenRecord()),
   });
   const fetchImpl = encryptedApiMock({
     "/app/v1/relatives/get_relative_list": {
       code: 0,
-      result: { relative_list: [] },
+      result: {
+        relative_list: [
+          { relative_uid: 42, relative_note: "妈妈", nickname: "小米用户" },
+          { relative_uid: 99, relative_note: "爸爸", service_token: "must-not-return" },
+        ],
+      },
     },
   });
   const worker = createWorker({ fetchImpl });
-  const result = await callMcp(worker, envWithKv(kv), {
+  const listed = await callMcp(worker, envWithKv(kv), {
     jsonrpc: "2.0",
     id: 7,
     method: "tools/call",
-    params: { name: "health_latest", arguments: {} },
+    params: { name: "health_relatives", arguments: {} },
   });
+  const relatives = JSON.parse(listed.json.result.content[0].text);
+  assert.deepEqual(relatives, [
+    { relative_uid: "42", relative_note: "妈妈", nickname: "小米用户" },
+    { relative_uid: "99", relative_note: "爸爸" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(listed.json), /must-not-return/);
 
-  assert.equal(result.json.result.isError, true);
-  assert.match(result.json.result.content[0].text, /亲友列表为空/);
+  const missing = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 71,
+    method: "tools/call",
+    params: {
+      name: "health_steps",
+      arguments: { target: "relative", relative_uid: "123" },
+    },
+  });
+  assert.equal(missing.json.result.isError, true);
+  assert.match(missing.json.result.content[0].text, /未找到 relative_uid=123/);
+});
+
+test("relative queries require relative_uid and use relatives endpoints", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/relatives/get_relative_list": {
+      code: 0,
+      result: { relative_list: [{ relative_uid: 42, relative_note: "妈妈" }] },
+    },
+    "/app/v1/relatives/get_aggregated_data": {
+      code: 0,
+      result: { data_list: [{ time: 1_787_558_400, value: '{"steps":456}' }] },
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const missingUid = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 72,
+    method: "tools/call",
+    params: { name: "health_steps", arguments: { target: "relative" } },
+  });
+  assert.equal(missingUid.json.result.isError, true);
+  assert.match(missingUid.json.result.content[0].text, /relative_uid/);
+
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: 73,
+    method: "tools/call",
+    params: {
+      name: "health_steps",
+      arguments: { target: "relative", relative_uid: 42, days: 1 },
+    },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.target, "relative");
+  assert.equal(value.relative_uid, "42");
+  assert.equal(value.data[0].steps, 456);
+  assert.equal(fetchImpl.calls.at(-1).url.pathname, "/app/v1/relatives/get_aggregated_data");
 });
 
 test("a Xiaomi 401 marks the stored credential expired", async () => {
