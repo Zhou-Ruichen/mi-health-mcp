@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Zero-dependency Xiaomi Fitness relatives MCP server for Cloudflare Workers",
+  "description": "Zero-dependency Xiaomi Fitness self and relatives MCP server for Cloudflare Workers",
   "engines": {
     "node": ">=20"
   },

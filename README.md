@@ -2,27 +2,27 @@
 
 ## 项目简介
 
-mi-health-mcp 把当前登录小米账号本人及已授权亲友的睡眠、心率和步数，通过 MCP 协议暴露给 RikkaHub 等 LLM 客户端。服务运行在 Cloudflare Workers 上，无需自建服务器，可在 Cloudflare 免费额度内使用。本项目基于 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 的接口逆向成果改写为 Cloudflare Worker + MCP 服务，感谢上游。
+mi-health-mcp 把当前登录小米账号本人及已授权亲友的睡眠、心率和步数，通过 MCP 协议提供给 Hermes 等 MCP 客户端。服务运行在 Cloudflare Workers 上。本项目源自 [wusaki0723/mi-health-mcp](https://github.com/wusaki0723/mi-health-mcp)，保留 GPL-3.0 许可证，并参考 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 与 [shkyyy18/mi_fitness_data_bridge](https://github.com/shkyyy18/mi_fitness_data_bridge) 的接口实现。
 
-## 一键部署
-
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wusaki0723/mi-health-mcp)
-
-部署流程要求绑定 Cloudflare KV。如果按钮流程提示创建或选择 KV namespace，请按引导完成，并确保绑定名为 `MI_HEALTH_KV`。
-
-### 按钮不灵时的手动部署
+## 部署
 
 需要 Node.js 20 或更高版本，以及一个 Cloudflare 账号。
 
 ```bash
-git clone https://github.com/wusaki0723/mi-health-mcp.git
+git clone https://github.com/<your-github-account>/mi-health-mcp.git
 cd mi-health-mcp
 npm install
 npx wrangler login
 npx wrangler kv namespace create MI_HEALTH_KV
 ```
 
-将命令输出的 namespace ID 填入 `wrangler.toml`，替换 `your-kv-namespace-id`。然后设置访问令牌并部署：
+复制公开模板并将命令输出的 namespace ID 写入本地配置。`wrangler.toml` 已被 Git 忽略，不会提交个人 KV ID：
+
+```bash
+cp wrangler.example.toml wrangler.toml
+```
+
+然后设置访问令牌并部署：
 
 ```bash
 npx wrangler secret put AUTH_TOKEN
@@ -33,7 +33,7 @@ npx wrangler deploy
 
 ### passToken 登录
 
-如果小米扫码登录不可用，可以将 Xiaomi Account 的 `userId` 和 `passToken` 作为 Cloudflare Secret 设置。Worker 会用它们换取 `sid=miothealth` 的短期健康 API session；原始 `passToken` 不会写入 KV 或通过 MCP 返回。
+推荐将 Xiaomi Account 的 `userId` 和 `passToken` 作为 Cloudflare Secret 设置。Worker 会用它们换取 `sid=miothealth` 的短期健康 API session；原始 `passToken` 不会写入 KV、日志或 MCP 返回。
 
 ```bash
 npx wrangler secret put XIAOMI_USER_ID
@@ -42,58 +42,39 @@ npx wrangler secret put XIAOMI_PASS_TOKEN
 
 也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。两个 Secret 必须同时设置，不能写入 `wrangler.toml`。
 
-## 部署后配置
+KV binding 名必须保持为 `MI_HEALTH_KV`。`AUTH_TOKEN`、`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须使用 Cloudflare Secret，不要写入源码、配置文件或 Git。
 
-1. 创建 KV namespace：
+## Hermes 配置
 
-   ```bash
-   npx wrangler kv namespace create MI_HEALTH_KV
-   ```
+```yaml
+mcp_servers:
+  mi_health:
+    url: "https://<worker-name>.<account-subdomain>.workers.dev/mcp"
+    headers:
+      Authorization: "Bearer ${MI_HEALTH_AUTH_TOKEN}"
+```
 
-2. 将命令输出的 namespace ID 填入 `wrangler.toml` 的 `[[kv_namespaces]]`，替换 `your-kv-namespace-id`，然后重新部署。通过一键部署时，也可以在按钮流程中按引导创建并绑定 KV。
-3. 交互式设置 MCP 鉴权令牌。令牌请自行生成一个长随机串：
-
-   ```bash
-   npx wrangler secret put AUTH_TOKEN
-   ```
-
-4. 配置有变化时重新部署：
-
-   ```bash
-   npx wrangler deploy
-   ```
-
-KV binding 名必须保持为 `MI_HEALTH_KV`。
-
-## 客户端配置
-
-在 RikkaHub 中打开「设置 > MCP > 新建连接 > Streamable HTTP」，填写：
-
-- URL：`https://<你的域名>/mcp`
-- 自定义 Header：`Authorization: Bearer <你的 token>`
-
-其中 `<你的 token>` 必须与部署时设置的 `AUTH_TOKEN` 完全一致。
+将 URL 替换为你自己部署的 Worker 地址。`MI_HEALTH_AUTH_TOKEN` 的值必须与该 Worker 的 `AUTH_TOKEN` Secret 一致。示例不包含真实凭证。
 
 ## 使用流程
 
-1. 客户端先调用 `health_login_start`，取得 `loginUrl`。
-2. 使用任意二维码工具把 `loginUrl` 渲染成二维码。
-3. 用小米运动健康 App 扫码并确认登录。
-4. 客户端轮调 `health_login_poll`，直到返回 `success`。
-5. 登录成功后，使用 `health_me` 确认当前账号，再使用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询本人数据。
-6. 要查询亲友时，先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
+1. 配置 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 后调用 `health_login_status`，Worker 会换取或恢复 `miothealth` session。
+2. 使用 `health_me` 确认当前账号，再调用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询本人数据。
+3. 查询亲友时先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
 
-如果配置了 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN`，可先调用 `health_login_status`。它会自动换取或恢复 `miothealth` session；session 过期后，健康查询也会自动换取一次并重试。二维码登录仍可作为未配置 Secret 时的 fallback。
+`health_login_start` 和 `health_login_poll` 仅为兼容保留。该二维码流程在部分账号会被 Xiaomi 拒绝并返回 `70036`，小米运动健康 App 也可能提示二维码不受支持；本项目不把它描述为已验证可用的登录方式。
 
-Worker 不生成二维码图片。健康查询默认 `target: "self"`，使用扫码登录账号的本人数据接口；不会把登录账号当作亲友，也不会自动选择亲友列表的第一项。
+健康查询默认 `target: "self"`，使用本人数据接口，不发送 `relative_uid`；亲友查询必须提供有效的 `relative_uid`，不会自动选择亲友列表第一项。
 
 ### MCP tools
 
 - `health_me`：返回当前登录状态和 `user_id`，不返回凭证。
 - `health_login_status`：返回当前健康 API session 是否可用及登录方式，不返回凭证。
 - `health_relatives`：列出可查询亲友的 `relative_uid` 和备注。
-- `health_latest`：查询最新的睡眠、心率和步数。
-- `health_sleep`、`health_heart`、`health_steps`：查询最近 1 至 30 天的对应记录。
+- `health_latest`：查询最新的睡眠、心率和步数摘要。
+- `health_sleep`：查询最近 1 至 30 天的每日睡眠摘要，每天最多一条。
+- `health_heart`：查询最近 1 至 30 天的每日心率统计，不返回全部采样点。
+- `health_steps`：查询最近 1 至 30 天的每日步数摘要，每天最多一条。
 
 查询本人时省略 `target` 或显式传入 `{"target":"self"}`。查询亲友时必须传入：
 
@@ -108,6 +89,10 @@ Worker 不生成二维码图片。健康查询默认 `target: "self"`，使用�
 ## 使用边界
 
 仅供登录你自己的小米账号、查询你已获授权的亲友数据。请勿用于任何侵犯他人隐私或违反小米用户协议的用途。
+
+本人数据使用 `POST /app/v1/data/get_fitness_data_by_time`。中国区查询窗口前后各扩展 18 小时，再按记录的 `zone_offset` 归入日期；缺少 `zone_offset` 时回退到 UTC+8。本人 steps 记录按接口的增量语义逐日汇总；本人 heart 采样点转换为每日统计；sleep 同日优先保留非小睡、持续时间更长、更新时间更新的记录。亲友数据使用 `/app/v1/relatives/*` 的 `daily_report`，同日记录不重复求和。
+
+MCP 返回使用字段白名单，不返回 `AUTH_TOKEN`、`passToken`、`cUserId`、`serviceToken`、`ssecurity` 或 Cookie。请勿提交 `.dev.vars`、`.env`、`wrangler.toml` 或 `.wrangler/`。
 
 ## 许可证
 

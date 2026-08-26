@@ -100,7 +100,7 @@ export async function handleRpc(message, env, fetchImpl = fetch) {
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "mi-health-mcp", version: "1.0.0" },
         instructions:
-          "查询当前登录小米账号本人或已授权亲友的健康数据。默认 target=self；查询亲友前先调用 health_relatives，并以 target=relative 和 relative_uid 指定目标。配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 后会自动换取 miothealth 会话；否则可调用 health_login_start 后轮询 health_login_poll。",
+          "查询当前登录小米账号本人或已授权亲友的健康数据。默认 target=self；查询亲友前先调用 health_relatives，并以 target=relative 和 relative_uid 指定目标。推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 自动换取 miothealth 会话。二维码登录仅保留兼容，Xiaomi 可能返回 70036。",
       },
     };
   }

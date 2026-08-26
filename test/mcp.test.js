@@ -292,6 +292,10 @@ test("health_latest defaults to the signed-in account and uses the self data end
     "/app/v1/data/get_fitness_data_by_time": (url, options, params) => {
       assert.equal(options.method, "POST");
       assert.equal(params.key === "sleep" || params.key === "heart_rate" || params.key === "steps", true);
+      assert.equal(
+        params.end_time - params.start_time + 1,
+        (params.key === "sleep" ? 2 * 86400 : 86400) + 36 * 3600,
+      );
       return {
         code: 0,
         result: {
@@ -324,7 +328,8 @@ test("health_latest defaults to the signed-in account and uses the self data end
   assert.equal(value.target, "self");
   assert.equal(value.user_id, "account-user");
   assert.equal(value.data.sleep.total_duration, 455);
-  assert.equal(value.data.heart_rate.bpm, 72);
+  assert.equal(value.data.heart_rate.avg_hr, 72);
+  assert.equal(value.data.heart_rate.sample_count, 1);
   assert.equal(value.data.steps.steps, 1234);
   assert.equal(fetchImpl.calls.length, 3);
   assert.equal(
@@ -400,7 +405,7 @@ test("self steps, sleep, and heart queries use the self data endpoint", async ()
       jsonrpc: "2.0",
       id: name,
       method: "tools/call",
-      params: { name, arguments: { target: "self", days: 1 } },
+      params: { name, arguments: { target: "self", relative_uid: "42", days: 1 } },
     });
     const value = JSON.parse(result.json.result.content[0].text);
     assert.equal(value.target, "self");
@@ -523,13 +528,20 @@ test("passToken secrets create and persist a miothealth session without storing 
 test("passToken session survives a Worker restart and serves self health data", async () => {
   const kv = new MemoryKv();
   const fetchImpl = passTokenSessionMock({
-    healthRoute: (url, options, params) => ({
-      code: 0,
-      result: {
-        data_list: [{ time: 1_787_558_400, value: JSON.stringify({ [params.key]: 1 }) }],
-        has_more: false,
-      },
-    }),
+    healthRoute: (url, options, params) => {
+      const values = {
+        steps: { steps: 1 },
+        sleep: { duration: 1 },
+        heart_rate: { bpm: 60 },
+      };
+      return {
+        code: 0,
+        result: {
+          data_list: [{ time: 1_787_558_400, value: JSON.stringify(values[params.key]) }],
+          has_more: false,
+        },
+      };
+    },
   });
   const env = envWithKv(kv, {
     XIAOMI_USER_ID: "synthetic-user",
@@ -557,6 +569,255 @@ test("passToken session survives a Worker restart and serves self health data", 
   }
   assert.equal(fetchImpl.accountCalls.length, 1);
   assert.equal(fetchImpl.healthCalls.length, 3);
+});
+
+test("30-day self series stay compact and use each record's zone offset", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const firstLocalMidnight = Date.UTC(2026, 6, 1) / 1000 - 8 * 60 * 60;
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": (url, options, params) => {
+      const data_list = [];
+      for (let day = 0; day < 30; day += 1) {
+        const dayStart = firstLocalMidnight + day * 86400;
+        if (params.key === "steps") {
+          for (let sample = 0; sample < 48; sample += 1) {
+            data_list.push({
+              time: dayStart + sample * 1800,
+              zone_offset: 8 * 60 * 60,
+              value: JSON.stringify({ steps: 100, distance: 70, calories: 4 }),
+            });
+          }
+        } else if (params.key === "heart_rate") {
+          for (let sample = 0; sample < 100; sample += 1) {
+            data_list.push({
+              time: dayStart + sample * 300,
+              zone_offset: 8 * 60 * 60,
+              value: JSON.stringify({ bpm: 60 + (sample % 21) }),
+            });
+          }
+        } else {
+          data_list.push(
+            {
+              time: dayStart + 8 * 3600,
+              update_time: dayStart + 9 * 3600,
+              zone_offset: 8 * 60 * 60,
+              value: JSON.stringify({ duration: 40, is_nap: true, sleep_score: 70 }),
+            },
+            {
+              time: dayStart + 7 * 3600,
+              update_time: dayStart + 8 * 3600,
+              zone_offset: 8 * 60 * 60,
+              value: JSON.stringify({ duration: 450, is_nap: false, sleep_score: 85 }),
+            },
+          );
+        }
+      }
+      return { code: 0, result: { data_list, has_more: false } };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+
+  for (const name of ["health_steps", "health_heart", "health_sleep"]) {
+    const result = await callMcp(worker, envWithKv(kv), {
+      jsonrpc: "2.0",
+      id: name,
+      method: "tools/call",
+      params: { name, arguments: { target: "self", days: 30 } },
+    });
+    const text = result.json.result.content[0].text;
+    const value = JSON.parse(text);
+    assert.equal(value.data.length, 30);
+    assert.ok(text.length < 20_000, `${name} result should remain compact`);
+  }
+
+  const steps = JSON.parse((await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "steps-check",
+    method: "tools/call",
+    params: { name: "health_steps", arguments: { days: 30 } },
+  })).json.result.content[0].text);
+  assert.equal(steps.data[0].date, "2026-07-01");
+  assert.equal(steps.data[0].steps, 4800);
+  assert.equal(steps.data[0].distance, 3360);
+
+  const heart = JSON.parse((await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "heart-check",
+    method: "tools/call",
+    params: { name: "health_heart", arguments: { days: 30 } },
+  })).json.result.content[0].text);
+  assert.equal(heart.data[0].sample_count, 100);
+  assert.equal(heart.data[0].min_hr, 60);
+  assert.equal(heart.data[0].max_hr, 80);
+  assert.equal(heart.data[0].avg_hr, 69.6);
+  assert.equal(heart.data[0].latest_hr.bpm, 75);
+  assert.equal("bpm_total" in heart.data[0], false);
+});
+
+test("sleep selects one main session per wake date deterministically", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const zoneOffset = -5 * 60 * 60;
+  const localMidnight = Date.UTC(2026, 7, 20) / 1000 - zoneOffset;
+  const wakeUpTime = localMidnight + 7 * 3600;
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": {
+      code: 0,
+      result: {
+        data_list: [
+          {
+            time: localMidnight - 1800,
+            update_time: localMidnight + 15 * 3600,
+            zone_offset: zoneOffset,
+            value: JSON.stringify({ duration: 60, is_nap: true, sleep_score: 95, wake_up_time: wakeUpTime }),
+          },
+          {
+            time: localMidnight - 1800,
+            update_time: localMidnight + 8 * 3600,
+            zone_offset: zoneOffset,
+            value: JSON.stringify({ duration: 420, is_nap: false, sleep_score: 80, wake_up_time: wakeUpTime }),
+          },
+          {
+            time: localMidnight - 1800,
+            update_time: localMidnight + 9 * 3600,
+            zone_offset: zoneOffset,
+            value: JSON.stringify({
+              duration: 450,
+              is_nap: false,
+              sleep_score: 86,
+              wake_up_time: wakeUpTime,
+              passToken: "must-not-return-pass",
+              cUserId: "must-not-return-c-user",
+            }),
+          },
+          {
+            time: localMidnight - 1800,
+            update_time: localMidnight + 10 * 3600,
+            zone_offset: zoneOffset,
+            value: JSON.stringify({
+              duration: 450,
+              is_nap: false,
+              sleep_score: 90,
+              wake_up_time: wakeUpTime,
+              serviceToken: "must-not-return-service",
+              ssecurity: "must-not-return-security",
+              Cookie: "must-not-return-cookie",
+            }),
+          },
+        ],
+        has_more: false,
+      },
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "sleep-dedup",
+    method: "tools/call",
+    params: { name: "health_sleep", arguments: { days: 1 } },
+  });
+  const text = result.json.result.content[0].text;
+  const value = JSON.parse(text);
+  assert.equal(value.data.length, 1);
+  assert.equal(value.data[0].date, "2026-08-20");
+  assert.equal(value.data[0].total_duration, 450);
+  assert.equal(value.data[0].sleep_score, 90);
+  assert.equal(value.data[0].wake_up_time, wakeUpTime);
+  assert.doesNotMatch(text, /must-not-return/);
+});
+
+test("health_latest selects the newest sleep by actual time across time zones", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const newerEpoch = Date.UTC(2026, 7, 21, 1) / 1000;
+  const olderEpoch = Date.UTC(2026, 7, 20, 23) / 1000;
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": (url, options, params) => ({
+      code: 0,
+      result: {
+        data_list: params.key === "sleep"
+          ? [
+              {
+                time: newerEpoch,
+                zone_offset: -12 * 3600,
+                value: JSON.stringify({ duration: 420, sleep_score: 90 }),
+              },
+              {
+                time: olderEpoch,
+                zone_offset: 14 * 3600,
+                value: JSON.stringify({ duration: 430, sleep_score: 70 }),
+              },
+            ]
+          : [],
+        has_more: false,
+      },
+    }),
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "latest-timezone",
+    method: "tools/call",
+    params: { name: "health_latest", arguments: {} },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.data.sleep.sleep_score, 90);
+  assert.equal(value.data.sleep.time, newerEpoch);
+});
+
+test("relative series validates and sends only the requested relative_uid", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/relatives/get_relative_list": {
+      code: 0,
+      result: { relative_list: [{ relative_uid: 42, relative_note: "家人" }] },
+    },
+    "/app/v1/relatives/get_aggregated_data": (url, options, params) => {
+      assert.equal(params.relative_uid, "42");
+      assert.equal(params.tag, "daily_report");
+      return {
+        code: 0,
+        result: {
+          data_list: [
+            {
+              time: 1_787_558_400,
+              update_time: 1_787_558_500,
+              value: JSON.stringify({ steps: 456, cUserId: "must-not-return-c-user" }),
+            },
+            {
+              time: 1_787_558_400,
+              update_time: 1_787_558_600,
+              value: JSON.stringify({ steps: 789, serviceToken: "must-not-return-service" }),
+            },
+          ],
+        },
+      };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "relative-uid",
+    method: "tools/call",
+    params: {
+      name: "health_steps",
+      arguments: { target: "relative", relative_uid: "42", days: 1 },
+    },
+  });
+  assert.equal(result.json.result.isError, undefined);
+  assert.equal(JSON.parse(result.json.result.content[0].text).data[0].steps, 789);
+  assert.doesNotMatch(result.json.result.content[0].text, /must-not-return/);
+});
+
+test("login tool descriptions recommend passToken and disclose QR 70036", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const listed = await callMcp(worker, envWithKv(), {
+    jsonrpc: "2.0",
+    id: "login-descriptions",
+    method: "tools/list",
+  });
+  const tools = new Map(listed.json.result.tools.map((tool) => [tool.name, tool]));
+  assert.match(tools.get("health_login_status").description, /推荐.*XIAOMI_USER_ID.*XIAOMI_PASS_TOKEN/);
+  assert.match(tools.get("health_login_start").description, /70036/);
+  assert.match(tools.get("health_login_poll").description, /70036/);
 });
 
 test("an expired health session is renewed from passToken secrets and retried", async () => {

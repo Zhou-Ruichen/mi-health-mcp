@@ -26,6 +26,7 @@ const LOGIN_USER_AGENT =
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const CST_OFFSET_SECONDS = 8 * 60 * 60;
+const MAX_TIMEZONE_OFFSET_SECONDS = 18 * 60 * 60;
 
 export class XiaomiError extends Error {}
 
@@ -203,7 +204,7 @@ export async function getAuthStatus(env) {
       status: "missing",
       user_id: null,
       updated_at: null,
-      message: "尚未登录，请调用 health_login_start",
+      message: "尚未登录；推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN",
     };
   }
 
@@ -223,7 +224,7 @@ export async function getAuthStatus(env) {
           : "凭证已过期，请重新扫码登录"
         : complete
           ? "凭证已就绪"
-          : "凭证不完整，请重新扫码登录",
+          : "凭证不完整；推荐检查 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN",
   };
 }
 
@@ -243,7 +244,7 @@ export async function getLoginStatus(env, fetchImpl = fetch) {
       method: null,
       user_id: token?.user_id || null,
       session_valid: false,
-      message: "未配置 XIAOMI_USER_ID/XIAOMI_PASS_TOKEN；可使用 health_login_start 扫码登录",
+      message: "未配置 XIAOMI_USER_ID/XIAOMI_PASS_TOKEN；二维码登录仅为兼容，可能收到 Xiaomi 70036",
     };
   }
   try {
@@ -548,14 +549,6 @@ export async function getHealthMe(env, fetchImpl = fetch) {
   };
 }
 
-function normalizeLatestItem(item) {
-  const value = parseEmbeddedValue(item?.value);
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return { time: Number(item?.time || 0), ...value };
-  }
-  return { time: Number(item?.time || 0), value };
-}
-
 async function getSelfFitnessItems(env, token, key, start, end, fetchImpl) {
   const items = [];
   const seenNextKeys = new Set();
@@ -581,20 +574,247 @@ async function getSelfFitnessItems(env, token, key, start, end, fetchImpl) {
   }
 }
 
-function selectLatest(items) {
-  return items.reduce((latest, item) =>
-    Number(item?.time || 0) > Number(latest?.time || 0) ? item : latest,
-  null);
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
-function latestResponse(itemsByMetric, target) {
+function recordZoneOffset(item) {
+  const offset = finiteNumber(item?.zone_offset);
+  return offset !== null && Math.abs(offset) <= 18 * 60 * 60
+    ? offset
+    : CST_OFFSET_SECONDS;
+}
+
+function localDate(timestamp, zoneOffset = CST_OFFSET_SECONDS) {
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
+  return new Date((timestamp + zoneOffset) * 1000).toISOString().slice(0, 10);
+}
+
+function parsedRecord(item, metric) {
+  const embedded = parseEmbeddedValue(item?.value);
+  const value = embedded && typeof embedded === "object" && !Array.isArray(embedded)
+    ? embedded
+    : {};
+  const time = finiteNumber(item?.time) || finiteNumber(value.date_time) || finiteNumber(value.time) || 0;
+  const wakeTime = metric === "sleep"
+    ? finiteNumber(value.wake_up_time) ||
+      finiteNumber(value.device_wake_up_time) ||
+      finiteNumber(value.out_bed_timestamp) ||
+      time
+    : time;
+  return {
+    date: localDate(wakeTime, recordZoneOffset(item)),
+    time,
+    updateTime: finiteNumber(item?.update_time) || 0,
+    value,
+  };
+}
+
+function copyNumbers(source, keys) {
+  const output = {};
+  for (const key of keys) {
+    const value = finiteNumber(source[key]);
+    if (value !== null) output[key] = value;
+  }
+  return output;
+}
+
+function sleepDuration(value) {
+  const explicit = finiteNumber(value.total_duration) || finiteNumber(value.duration);
+  if (explicit !== null) return explicit;
+  const bedtime = finiteNumber(value.bedtime) ||
+    finiteNumber(value.device_bedtime) ||
+    finiteNumber(value.bed_timestamp);
+  const wakeTime = finiteNumber(value.wake_up_time) ||
+    finiteNumber(value.device_wake_up_time) ||
+    finiteNumber(value.out_bed_timestamp);
+  return bedtime && wakeTime && wakeTime >= bedtime
+    ? Math.floor((wakeTime - bedtime) / 60)
+    : 0;
+}
+
+function isNap(value) {
+  return value.is_nap === true || value.is_nap === 1 || value.is_nap === "1";
+}
+
+function preferredDailyRecord(candidate, current, metric) {
+  if (!current) return true;
+  if (metric === "sleep") {
+    if (isNap(candidate.value) !== isNap(current.value)) {
+      return !isNap(candidate.value);
+    }
+    const candidateDuration = sleepDuration(candidate.value);
+    const currentDuration = sleepDuration(current.value);
+    if (candidateDuration !== currentDuration) return candidateDuration > currentDuration;
+  }
+  if (candidate.updateTime !== current.updateTime) {
+    return candidate.updateTime > current.updateTime;
+  }
+  return candidate.time > current.time;
+}
+
+function selectDailyRecords(items, metric) {
+  const byDate = new Map();
+  for (const item of items) {
+    const record = parsedRecord(item, metric);
+    if (!record.date) continue;
+    const current = byDate.get(record.date);
+    if (preferredDailyRecord(record, current, metric)) {
+      byDate.set(record.date, record);
+    }
+  }
+  return [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function compactSleep(record) {
+  const value = record.value;
+  const output = {
+    date: record.date,
+    time: record.time,
+    ...copyNumbers(value, [
+      "sleep_stage",
+      "sleep_deep_duration",
+      "sleep_light_duration",
+      "sleep_rem_duration",
+      "sleep_awake_duration",
+      "awake_count",
+      "avg_hr",
+      "max_hr",
+      "min_hr",
+      "avg_spo2",
+    ]),
+  };
+  const duration = sleepDuration(value);
+  if (duration > 0) output.total_duration = duration;
+  const score = finiteNumber(value.sleep_score) ?? finiteNumber(value.score);
+  if (score !== null) output.sleep_score = score;
+  const bedtime = finiteNumber(value.bedtime) ||
+    finiteNumber(value.device_bedtime) ||
+    finiteNumber(value.bed_timestamp);
+  const wakeTime = finiteNumber(value.wake_up_time) ||
+    finiteNumber(value.device_wake_up_time) ||
+    finiteNumber(value.out_bed_timestamp);
+  if (bedtime) output.bedtime = bedtime;
+  if (wakeTime) output.wake_up_time = wakeTime;
+  if (Object.hasOwn(value, "is_nap")) output.is_nap = isNap(value);
+  return output;
+}
+
+function compactRelativeRecord(record, metric) {
+  if (metric === "sleep") return compactSleep(record);
+  if (metric === "steps") {
+    return {
+      date: record.date,
+      time: record.time,
+      ...copyNumbers(record.value, ["steps", "distance", "calories", "goal"]),
+    };
+  }
+  const output = {
+    date: record.date,
+    time: record.time,
+    ...copyNumbers(record.value, [
+      "bpm",
+      "avg_hr",
+      "avg_rhr",
+      "max_hr",
+      "min_hr",
+      "abnormal_hr_count",
+      "aerobic_hr_zone_duration",
+      "anaerobic_hr_zone_duration",
+      "extreme_hr_zone_duration",
+      "fat_burning_hr_zone_duration",
+      "warm_up_hr_zone_duration",
+    ]),
+  };
+  const latest = record.value.latest_hr;
+  if (latest && typeof latest === "object" && !Array.isArray(latest)) {
+    const bpm = finiteNumber(latest.bpm);
+    const time = finiteNumber(latest.time);
+    if (bpm !== null || time !== null) {
+      output.latest_hr = {};
+      if (bpm !== null) output.latest_hr.bpm = bpm;
+      if (time !== null) output.latest_hr.time = time;
+    }
+  }
+  return output;
+}
+
+function compactSelfSteps(items) {
+  const byDate = new Map();
+  for (const item of items) {
+    const record = parsedRecord(item, "steps");
+    if (!record.date) continue;
+    const daily = byDate.get(record.date) || { date: record.date, time: 0 };
+    daily.time = Math.max(daily.time, record.time);
+    for (const key of ["steps", "distance", "calories"]) {
+      const value = finiteNumber(record.value[key]);
+      if (value !== null) daily[key] = (daily[key] || 0) + value;
+    }
+    byDate.set(record.date, daily);
+  }
+  return [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function compactSelfHeart(items) {
+  const byDate = new Map();
+  for (const item of items) {
+    const record = parsedRecord(item, "heart_rate");
+    const bpm = finiteNumber(record.value.bpm);
+    if (!record.date || bpm === null || bpm <= 0) continue;
+    const daily = byDate.get(record.date) || {
+      date: record.date,
+      time: 0,
+      sample_count: 0,
+      bpm_total: 0,
+      min_hr: bpm,
+      max_hr: bpm,
+      latest_hr: { bpm, time: record.time },
+    };
+    daily.sample_count += 1;
+    daily.bpm_total += bpm;
+    daily.min_hr = Math.min(daily.min_hr, bpm);
+    daily.max_hr = Math.max(daily.max_hr, bpm);
+    if (record.time >= daily.latest_hr.time) daily.latest_hr = { bpm, time: record.time };
+    daily.time = Math.max(daily.time, record.time);
+    byDate.set(record.date, daily);
+  }
+  return [...byDate.values()]
+    .sort((left, right) => left.date.localeCompare(right.date))
+    .map(({ bpm_total, ...daily }) => ({
+      ...daily,
+      avg_hr: Math.round((bpm_total / daily.sample_count) * 10) / 10,
+    }));
+}
+
+function compactSeries(items, metric, target) {
+  if (target === "self" && metric === "steps") return compactSelfSteps(items);
+  if (target === "self" && metric === "heart_rate") return compactSelfHeart(items);
+  return selectDailyRecords(items, metric).map((record) =>
+    compactRelativeRecord(record, metric));
+}
+
+function latestItemTime(item) {
+  return Math.max(
+    finiteNumber(item?.time) || 0,
+    finiteNumber(item?.wake_up_time) || 0,
+    finiteNumber(item?.latest_hr?.time) || 0,
+  );
+}
+
+function latestResponse(seriesByMetric, target) {
   const data = {};
   let latestDataTime = 0;
-  for (const [metric, items] of Object.entries(itemsByMetric)) {
-    const item = selectLatest(items);
+  for (const [metric, items] of Object.entries(seriesByMetric)) {
+    const item = items.reduce((latest, candidate) =>
+      !latest || latestItemTime(candidate) > latestItemTime(latest)
+        ? candidate
+        : latest,
+    null);
     if (!item) continue;
-    data[metric] = normalizeLatestItem(item);
-    latestDataTime = Math.max(latestDataTime, Number(item.time || 0));
+    data[metric] = item;
+    latestDataTime = Math.max(latestDataTime, latestItemTime(item));
   }
   return {
     ...target,
@@ -610,14 +830,19 @@ function latestResponse(itemsByMetric, target) {
 export async function getLatestHealth(env, target, fetchImpl = fetch, now = Date.now()) {
   if (target.target === "self") {
     const token = await requireSelfToken(env, fetchImpl);
-    const { start, end } = cstTodayWindow(now, 1);
-    const [sleep, heart_rate, steps] = await Promise.all(
-      ["sleep", "heart_rate", "steps"].map((key) =>
-        getSelfFitnessItems(env, token, key, start, end, fetchImpl),
-      ),
-    );
+    const today = healthQueryWindow(now, 1);
+    const sleepWindow = healthQueryWindow(now, 2);
+    const [sleepItems, heartItems, stepItems] = await Promise.all([
+      getSelfFitnessItems(env, token, "sleep", sleepWindow.start, sleepWindow.end, fetchImpl),
+      getSelfFitnessItems(env, token, "heart_rate", today.start, today.end, fetchImpl),
+      getSelfFitnessItems(env, token, "steps", today.start, today.end, fetchImpl),
+    ]);
     return latestResponse(
-      { sleep, heart_rate, steps },
+      {
+        sleep: compactSeries(sleepItems, "sleep", "self"),
+        heart_rate: compactSeries(heartItems, "heart_rate", "self"),
+        steps: compactSeries(stepItems, "steps", "self"),
+      },
       { target: "self", user_id: token.user_id || null },
     );
   }
@@ -640,7 +865,11 @@ export async function getLatestHealth(env, target, fetchImpl = fetch, now = Date
   for (const item of items) {
     if (itemsByMetric[item?.key]) itemsByMetric[item.key].push(item);
   }
-  const output = latestResponse(itemsByMetric, {
+  const output = latestResponse({
+    sleep: compactSeries(itemsByMetric.sleep, "sleep", "relative"),
+    heart_rate: compactSeries(itemsByMetric.heart_rate, "heart_rate", "relative"),
+    steps: compactSeries(itemsByMetric.steps, "steps", "relative"),
+  }, {
     target: "relative",
     relative_uid: relativeUid,
   });
@@ -659,21 +888,12 @@ function cstTodayWindow(now, days) {
   return { start: end - 86400 * days + 1, end };
 }
 
-function cstDate(timestamp) {
-  if (!Number.isFinite(timestamp) || timestamp <= 0) return null;
-  return new Date((timestamp + CST_OFFSET_SECONDS) * 1000)
-    .toISOString()
-    .slice(0, 10);
-}
-
-function normalizeSeriesItem(item) {
-  const time = Number(item?.time || 0);
-  const value = parseEmbeddedValue(item?.value);
-  const data =
-    value && typeof value === "object" && !Array.isArray(value)
-      ? value
-      : { value };
-  return { date: cstDate(time), time, ...data };
+function healthQueryWindow(now, days) {
+  const window = cstTodayWindow(now, days);
+  return {
+    start: window.start - MAX_TIMEZONE_OFFSET_SECONDS,
+    end: window.end + MAX_TIMEZONE_OFFSET_SECONDS,
+  };
 }
 
 export async function getHealthSeries(
@@ -684,7 +904,7 @@ export async function getHealthSeries(
   fetchImpl = fetch,
   now = Date.now(),
 ) {
-  const { start, end } = cstTodayWindow(now, days);
+  const { start, end } = healthQueryWindow(now, days);
   if (target.target === "self") {
     const token = await requireSelfToken(env, fetchImpl);
     const items = await getSelfFitnessItems(
@@ -695,9 +915,7 @@ export async function getHealthSeries(
       end,
       fetchImpl,
     );
-    const data = items
-      .map(normalizeSeriesItem)
-      .sort((left, right) => left.time - right.time);
+    const data = compactSeries(items, metric, "self").slice(-days);
     return {
       target: "self",
       user_id: token.user_id || null,
@@ -731,9 +949,7 @@ export async function getHealthSeries(
     },
   );
   const items = responseResult(response).data_list;
-  const data = (Array.isArray(items) ? items : [])
-    .map(normalizeSeriesItem)
-    .sort((left, right) => left.time - right.time);
+  const data = compactSeries(Array.isArray(items) ? items : [], metric, "relative").slice(-days);
 
   return {
     target: "relative",
@@ -810,7 +1026,7 @@ export async function startQrLogin(env, fetchImpl = fetch, now = Date.now()) {
     status: "pending",
     loginUrl: data.loginUrl,
     expires_at: expiresAt,
-    message: "请将 loginUrl 渲染为二维码并用小米账号 App 扫描",
+    message: "兼容二维码已生成；该流程可能被 Xiaomi 拒绝并返回 70036",
   };
 }
 

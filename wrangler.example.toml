@@ -9,6 +9,4 @@ head_sampling_rate = 1
 
 [[kv_namespaces]]
 binding = "MI_HEALTH_KV"
-# 运行 `npx wrangler kv namespace create MI_HEALTH_KV` 创建 namespace，
-# 再将下面的占位符替换为命令输出的 namespace id。
-id = "c3d5b52df4574046936f9bea334b696e"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"

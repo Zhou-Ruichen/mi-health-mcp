@@ -67,22 +67,22 @@ const daysSchema = {
 export const TOOLS = [
   {
     name: "health_latest",
-    description: "查询本人或指定亲友最新的睡眠、心率和步数快照。用户说“我、我的、本人”时 target=self；说“亲友、家人、指定用户”时 target=relative 并提供 relative_uid。",
+    description: "查询本人或指定亲友最新的睡眠、心率和步数摘要。用户说“我、我的、本人”时 target=self；说“亲友、家人、指定用户”时 target=relative 并提供 relative_uid。",
     inputSchema: targetSchema,
   },
   {
     name: "health_sleep",
-    description: "查询本人或指定亲友最近的睡眠记录。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
+    description: "查询本人或指定亲友最近的每日睡眠摘要，每天最多一条。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
     inputSchema: daysSchema,
   },
   {
     name: "health_heart",
-    description: "查询本人或指定亲友最近的心率记录。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
+    description: "查询本人或指定亲友最近的每日心率统计，不返回全部采样点。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
     inputSchema: daysSchema,
   },
   {
     name: "health_steps",
-    description: "查询本人或指定亲友最近的步数记录。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
+    description: "查询本人或指定亲友最近的每日步数摘要，每天最多一条。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
     inputSchema: daysSchema,
   },
   {
@@ -102,17 +102,17 @@ export const TOOLS = [
   },
   {
     name: "health_login_status",
-    description: "查看当前健康 API 会话状态。配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 后会自动换取 miothealth 会话；不会返回任何 token 或 cookie。",
+    description: "查看当前健康 API 会话状态。推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN，Worker 会自动换取 miothealth 会话；不会返回任何 token 或 cookie。",
     inputSchema: emptySchema,
   },
   {
     name: "health_login_start",
-    description: "发起小米账号扫码登录，返回供调用方自行渲染二维码的 loginUrl。",
+    description: "兼容用的小米账号扫码登录入口。二维码登录可能被 Xiaomi 拒绝并返回 70036，推荐改用 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN。",
     inputSchema: emptySchema,
   },
   {
     name: "health_login_poll",
-    description: "轮询扫码结果；成功后将新凭证写入 Cloudflare KV。",
+    description: "轮询兼容用的扫码登录结果。二维码登录可能收到 Xiaomi 70036；成功时才会缓存健康会话。",
     inputSchema: emptySchema,
   },
 ];
