@@ -1,0 +1,82 @@
+# mi-health-mcp
+
+## 项目简介
+
+mi-health-mcp 把小米运动健康的亲友数据，包括睡眠、心率和步数，通过 MCP 协议暴露给 RikkaHub 等 LLM 客户端。服务运行在 Cloudflare Workers 上，无需自建服务器，可在 Cloudflare 免费额度内使用。本项目基于 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 的接口逆向成果改写为 Cloudflare Worker + MCP 服务，感谢上游。
+
+## 一键部署
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/wusaki0723/mi-health-mcp)
+
+部署流程要求绑定 Cloudflare KV。如果按钮流程提示创建或选择 KV namespace，请按引导完成，并确保绑定名为 `MI_HEALTH_KV`。
+
+### 按钮不灵时的手动部署
+
+需要 Node.js 20 或更高版本，以及一个 Cloudflare 账号。
+
+```bash
+git clone https://github.com/wusaki0723/mi-health-mcp.git
+cd mi-health-mcp
+npm install
+npx wrangler login
+npx wrangler kv namespace create MI_HEALTH_KV
+```
+
+将命令输出的 namespace ID 填入 `wrangler.toml`，替换 `your-kv-namespace-id`。然后设置访问令牌并部署：
+
+```bash
+npx wrangler secret put AUTH_TOKEN
+npx wrangler deploy
+```
+
+`AUTH_TOKEN` 的值请使用自己生成的长随机串，不要写进源码、`wrangler.toml` 或 Git。
+
+## 部署后配置
+
+1. 创建 KV namespace：
+
+   ```bash
+   npx wrangler kv namespace create MI_HEALTH_KV
+   ```
+
+2. 将命令输出的 namespace ID 填入 `wrangler.toml` 的 `[[kv_namespaces]]`，替换 `your-kv-namespace-id`，然后重新部署。通过一键部署时，也可以在按钮流程中按引导创建并绑定 KV。
+3. 交互式设置 MCP 鉴权令牌。令牌请自行生成一个长随机串：
+
+   ```bash
+   npx wrangler secret put AUTH_TOKEN
+   ```
+
+4. 配置有变化时重新部署：
+
+   ```bash
+   npx wrangler deploy
+   ```
+
+KV binding 名必须保持为 `MI_HEALTH_KV`。
+
+## 客户端配置
+
+在 RikkaHub 中打开「设置 > MCP > 新建连接 > Streamable HTTP」，填写：
+
+- URL：`https://<你的域名>/mcp`
+- 自定义 Header：`Authorization: Bearer <你的 token>`
+
+其中 `<你的 token>` 必须与部署时设置的 `AUTH_TOKEN` 完全一致。
+
+## 使用流程
+
+1. 客户端先调用 `health_login_start`，取得 `loginUrl`。
+2. 使用任意二维码工具把 `loginUrl` 渲染成二维码。
+3. 用小米运动健康 App 扫码并确认登录。
+4. 客户端轮调 `health_login_poll`，直到返回 `success`。
+5. 登录成功后，使用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询数据。
+
+Worker 不生成二维码图片。查询时会动态读取亲友列表并使用第一项，不在代码中写死用户 ID。
+
+## 使用边界
+
+仅供登录你自己的小米账号、查询你已获授权的亲友数据。请勿用于任何侵犯他人隐私或违反小米用户协议的用途。
+
+## 许可证
+
+本项目采用 [GNU General Public License v3.0](LICENSE)（GPL-3.0），与上游 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 的许可证保持一致。

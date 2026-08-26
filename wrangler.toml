@@ -1,0 +1,14 @@
+name = "mi-health-mcp"
+main = "src/index.js"
+compatibility_date = "2026-08-24"
+workers_dev = true
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[[kv_namespaces]]
+binding = "MI_HEALTH_KV"
+# 运行 `npx wrangler kv namespace create MI_HEALTH_KV` 创建 namespace，
+# 再将下面的占位符替换为命令输出的 namespace id。
+id = "c3d5b52df4574046936f9bea334b696e"
