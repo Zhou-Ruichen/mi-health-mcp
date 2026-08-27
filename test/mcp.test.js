@@ -100,7 +100,12 @@ function encryptedApiMock(routes) {
   return fetchImpl;
 }
 
-function passTokenSessionMock({ healthRoute, serviceLoginCode = 0, expectedDeviceId } = {}) {
+function passTokenSessionMock({
+  healthRoute,
+  serviceLoginCode = 0,
+  expectedDeviceId,
+  directLogin = false,
+} = {}) {
   const healthFetch = encryptedApiMock({
     "/app/v1/data/get_fitness_data_by_time": healthRoute || {
       code: 0,
@@ -114,15 +119,26 @@ function passTokenSessionMock({ healthRoute, serviceLoginCode = 0, expectedDevic
       accountCalls.push({ url, options });
       assert.equal(url.searchParams.get("_json"), "true");
       assert.equal(url.searchParams.get("sid"), "miothealth");
-      assert.doesNotMatch(options.headers.Cookie, /userId|passToken/);
+      assert.match(options.headers.Cookie, /userId=synthetic-user/);
+      assert.match(options.headers.Cookie, /passToken=synthetic-pass-token/);
       assert.match(options.headers.Cookie, /sdkVersion=3\.9/);
       if (expectedDeviceId) assert.match(options.headers.Cookie, new RegExp(`deviceId=${expectedDeviceId}`));
       return new Response(
         `&&&START&&&${JSON.stringify({
           code: 0,
-          _sign: "sign-value",
-          callback: "https://sts-hlth.io.mi.com/healthapp/sts",
-          qs: "%3Fsid%3Dmiothealth%26_json%3Dtrue",
+          ...(directLogin
+            ? {
+                userId: "account-user",
+                cUserId: "c-user-secret",
+                ssecurity: SSECURITY,
+                nonce: "nonce-value",
+                location: "https://sts.api.io.mi.com/login-complete?sid=miothealth",
+              }
+            : {
+                _sign: "sign-value",
+                callback: "https://sts-hlth.io.mi.com/healthapp/sts",
+                qs: "%3Fsid%3Dmiothealth%26_json%3Dtrue",
+              }),
         })}`,
         { status: 200 },
       );
@@ -552,7 +568,10 @@ test("health_login_refresh uses the configured browser deviceId without exposing
   const kv = new MemoryKv({
     [TOKEN_KEY]: JSON.stringify(tokenRecord({ auth_method: "qr" })),
   });
-  const fetchImpl = passTokenSessionMock({ expectedDeviceId: "wb_test_device" });
+  const fetchImpl = passTokenSessionMock({
+    expectedDeviceId: "wb_test_device",
+    directLogin: true,
+  });
   const env = envWithKv(kv, {
     XIAOMI_USER_ID: "synthetic-user",
     XIAOMI_PASS_TOKEN: "synthetic-pass-token",
@@ -578,6 +597,7 @@ test("health_login_refresh uses the configured browser deviceId without exposing
   assert.equal(stored.auth_method, "pass_token");
   assert.equal("pass_token" in stored, false);
   assert.doesNotMatch(JSON.stringify({ value, stored }), /synthetic-pass-token/);
+  assert.equal(fetchImpl.accountCalls.length, 1);
 });
 
 test("passToken session survives a Worker restart and serves self health data", async () => {
