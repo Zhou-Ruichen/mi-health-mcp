@@ -102,7 +102,12 @@ export const TOOLS = [
   },
   {
     name: "health_login_status",
-    description: "查看当前健康 API 会话状态。推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN，Worker 会自动换取 miothealth 会话；不会返回任何 token 或 cookie。",
+    description: "查看当前健康 API 会话状态。推荐配置 XIAOMI_USER_ID、XIAOMI_PASS_TOKEN 和浏览器 Cookie 中的 XIAOMI_DEVICE_ID；不会返回任何 token 或 cookie。",
+    inputSchema: emptySchema,
+  },
+  {
+    name: "health_login_refresh",
+    description: "使用已配置的小米账号 Secret 重新换取 miothealth 会话。成功时更新 KV；失败时保留当前缓存会话；不会返回任何 token 或 cookie。",
     inputSchema: emptySchema,
   },
   {
@@ -192,6 +197,15 @@ export async function callTool(
       return withAuthTracking(env, fetchImpl, () => getRelatives(env, fetchImpl));
     case "health_login_status":
       return getLoginStatus(env, fetchImpl);
+    case "health_login_refresh": {
+      const token = await exchangePassTokenSession(env, fetchImpl);
+      return {
+        logged_in: true,
+        method: "pass_token",
+        user_id: token.user_id,
+        session_valid: true,
+      };
+    }
     case "health_login_start":
       return startQrLogin(env, fetchImpl);
     case "health_login_poll":

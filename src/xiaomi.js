@@ -9,6 +9,7 @@ export const LOGIN_SESSION_KEY = "mi_fitness_login_session";
 
 const XIAOMI_QR_LOGIN_URL = "https://account.xiaomi.com/longPolling/loginUrl";
 const XIAOMI_SERVICE_LOGIN_URL = "https://account.xiaomi.com/pass/serviceLogin";
+const XIAOMI_SERVICE_LOGIN_AUTH2_URL = "https://account.xiaomi.com/pass/serviceLoginAuth2";
 const STS_HEALTH_URL = "https://sts-hlth.io.mi.com/healthapp/sts";
 const HEALTH_API_BASE = "https://hlth.io.mi.com";
 const SERVICE_SID = "miothealth";
@@ -277,6 +278,9 @@ function passTokenCredentials(env) {
   const passToken = typeof env?.XIAOMI_PASS_TOKEN === "string"
     ? env.XIAOMI_PASS_TOKEN
     : "";
+  const deviceId = typeof env?.XIAOMI_DEVICE_ID === "string"
+    ? env.XIAOMI_DEVICE_ID.trim()
+    : "";
   if (!userId && !passToken) return null;
   if (!userId || !passToken) {
     throw new XiaomiAuthError(
@@ -284,7 +288,7 @@ function passTokenCredentials(env) {
       { authExpired: false },
     );
   }
-  return { userId, passToken };
+  return { userId, passToken, deviceId };
 }
 
 async function clientSign(nonce, ssecurity) {
@@ -306,22 +310,18 @@ export async function exchangePassTokenSession(
       { authExpired: false },
     );
   }
-  const deviceId = randomDeviceId();
+  const deviceId = credentials.deviceId || randomDeviceId();
   const url = new URL(XIAOMI_SERVICE_LOGIN_URL);
   url.searchParams.set("_json", "true");
   url.searchParams.set("sid", SERVICE_SID);
-  let response;
+  let loginResponse;
   try {
-    response = await fetchImpl(url, {
+    loginResponse = await fetchImpl(url, {
       method: "GET",
       redirect: "manual",
       headers: {
         "User-Agent": LOGIN_USER_AGENT,
-        Cookie: cookieHeader({
-          userId: credentials.userId,
-          passToken: credentials.passToken,
-          deviceId,
-        }),
+        Cookie: cookieHeader({ sdkVersion: "3.9", deviceId }),
       },
     });
   } catch {
@@ -329,12 +329,52 @@ export async function exchangePassTokenSession(
       authExpired: false,
     });
   }
-  const body = await readTextLimited(response);
-  if (response.status === 401 || response.status === 403) {
+  const loginBody = await readTextLimited(loginResponse);
+  if (!loginResponse.ok) {
+    throw new XiaomiApiError(`Xiaomi Account serviceLogin 失败（HTTP ${loginResponse.status}）`);
+  }
+  const loginData = parseMiResponse(loginBody);
+  if (!loginData._sign || !loginData.callback || !loginData.qs) {
+    throw new XiaomiAuthError("miothealth 登录参数获取失败", { authExpired: false });
+  }
+
+  const authBody = new URLSearchParams({
+    user: credentials.userId,
+    sid: SERVICE_SID,
+    _json: "true",
+    callback: loginData.callback,
+    _sign: loginData._sign,
+    qs: loginData.qs,
+    _parset: "true",
+  }).toString();
+  let authResponse;
+  try {
+    authResponse = await fetchImpl(XIAOMI_SERVICE_LOGIN_AUTH2_URL, {
+      method: "POST",
+      redirect: "manual",
+      headers: {
+        "User-Agent": LOGIN_USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded",
+        Cookie: cookieHeader({
+          sdkVersion: "3.9",
+          userId: credentials.userId,
+          passToken: credentials.passToken,
+          deviceId,
+        }),
+      },
+      body: authBody,
+    });
+  } catch {
+    throw new XiaomiAuthError("Xiaomi Account serviceLoginAuth2 请求失败", {
+      authExpired: false,
+    });
+  }
+  const body = await readTextLimited(authResponse);
+  if (authResponse.status === 401 || authResponse.status === 403) {
     throw new XiaomiAuthError("passToken 无效或已过期", { authExpired: false });
   }
-  if (!response.ok) {
-    throw new XiaomiApiError(`Xiaomi Account serviceLogin 失败（HTTP ${response.status}）`);
+  if (!authResponse.ok) {
+    throw new XiaomiApiError(`Xiaomi Account serviceLoginAuth2 失败（HTTP ${authResponse.status}）`);
   }
   const data = parseMiResponse(body);
   if (Number(data?.code ?? 0) !== 0) {

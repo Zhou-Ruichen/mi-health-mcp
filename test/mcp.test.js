@@ -100,7 +100,7 @@ function encryptedApiMock(routes) {
   return fetchImpl;
 }
 
-function passTokenSessionMock({ healthRoute, serviceLoginCode = 0 } = {}) {
+function passTokenSessionMock({ healthRoute, serviceLoginCode = 0, expectedDeviceId } = {}) {
   const healthFetch = encryptedApiMock({
     "/app/v1/data/get_fitness_data_by_time": healthRoute || {
       code: 0,
@@ -114,8 +114,30 @@ function passTokenSessionMock({ healthRoute, serviceLoginCode = 0 } = {}) {
       accountCalls.push({ url, options });
       assert.equal(url.searchParams.get("_json"), "true");
       assert.equal(url.searchParams.get("sid"), "miothealth");
+      assert.doesNotMatch(options.headers.Cookie, /userId|passToken/);
+      assert.match(options.headers.Cookie, /sdkVersion=3\.9/);
+      if (expectedDeviceId) assert.match(options.headers.Cookie, new RegExp(`deviceId=${expectedDeviceId}`));
+      return new Response(
+        `&&&START&&&${JSON.stringify({
+          code: 0,
+          _sign: "sign-value",
+          callback: "https://sts-hlth.io.mi.com/healthapp/sts",
+          qs: "%3Fsid%3Dmiothealth%26_json%3Dtrue",
+        })}`,
+        { status: 200 },
+      );
+    }
+    if (url.hostname === "account.xiaomi.com" && url.pathname === "/pass/serviceLoginAuth2") {
+      accountCalls.push({ url, options });
+      assert.equal(options.method, "POST");
       assert.match(options.headers.Cookie, /userId=synthetic-user/);
       assert.match(options.headers.Cookie, /passToken=synthetic-pass-token/);
+      assert.match(options.headers.Cookie, /sdkVersion=3\.9/);
+      if (expectedDeviceId) assert.match(options.headers.Cookie, new RegExp(`deviceId=${expectedDeviceId}`));
+      const form = new URLSearchParams(options.body);
+      assert.equal(form.get("user"), "synthetic-user");
+      assert.equal(form.get("sid"), "miothealth");
+      assert.equal(form.get("_sign"), "sign-value");
       return new Response(
         `&&&START&&&${JSON.stringify(
           serviceLoginCode === 0
@@ -200,6 +222,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_me",
       "health_relatives",
       "health_login_status",
+      "health_login_refresh",
       "health_login_start",
       "health_login_poll",
     ],
@@ -522,7 +545,39 @@ test("passToken secrets create and persist a miothealth session without storing 
   assert.equal(stored.auth_method, "pass_token");
   assert.equal("pass_token" in stored, false);
   assert.doesNotMatch(JSON.stringify({ value, stored }), /synthetic-pass-token/);
-  assert.equal(fetchImpl.accountCalls.length, 1);
+  assert.equal(fetchImpl.accountCalls.length, 2);
+});
+
+test("health_login_refresh uses the configured browser deviceId without exposing credentials", async () => {
+  const kv = new MemoryKv({
+    [TOKEN_KEY]: JSON.stringify(tokenRecord({ auth_method: "qr" })),
+  });
+  const fetchImpl = passTokenSessionMock({ expectedDeviceId: "wb_test_device" });
+  const env = envWithKv(kv, {
+    XIAOMI_USER_ID: "synthetic-user",
+    XIAOMI_PASS_TOKEN: "synthetic-pass-token",
+    XIAOMI_DEVICE_ID: "wb_test_device",
+  });
+  const worker = createWorker({ fetchImpl });
+  const refreshed = await callMcp(worker, env, {
+    jsonrpc: "2.0",
+    id: "refresh-login",
+    method: "tools/call",
+    params: { name: "health_login_refresh", arguments: {} },
+  });
+
+  const value = JSON.parse(refreshed.json.result.content[0].text);
+  assert.deepEqual(value, {
+    logged_in: true,
+    method: "pass_token",
+    user_id: "account-user",
+    session_valid: true,
+  });
+  const stored = JSON.parse(await kv.get(TOKEN_KEY));
+  assert.equal(stored.device_id, "wb_test_device");
+  assert.equal(stored.auth_method, "pass_token");
+  assert.equal("pass_token" in stored, false);
+  assert.doesNotMatch(JSON.stringify({ value, stored }), /synthetic-pass-token/);
 });
 
 test("passToken session survives a Worker restart and serves self health data", async () => {
@@ -567,7 +622,7 @@ test("passToken session survives a Worker restart and serves self health data", 
     assert.equal(value.target, "self");
     assert.equal(value.data.length, 1);
   }
-  assert.equal(fetchImpl.accountCalls.length, 1);
+  assert.equal(fetchImpl.accountCalls.length, 2);
   assert.equal(fetchImpl.healthCalls.length, 3);
 });
 
@@ -846,7 +901,7 @@ test("an expired health session is renewed from passToken secrets and retried", 
   });
   const value = JSON.parse(result.json.result.content[0].text);
   assert.equal(value.data[0].steps, 1234);
-  assert.equal(fetchImpl.accountCalls.length, 1);
+  assert.equal(fetchImpl.accountCalls.length, 2);
   assert.equal(JSON.parse(await kv.get(TOKEN_KEY)).auth_state, "valid");
 });
 
@@ -900,7 +955,7 @@ test("a health API 401 refreshes the passToken session before retrying", async (
   });
   const value = JSON.parse(result.json.result.content[0].text);
   assert.equal(value.data[0].steps, 1234);
-  assert.equal(fetchImpl.accountCalls.length, 1);
+  assert.equal(fetchImpl.accountCalls.length, 2);
   assert.equal(healthAttempts, 2);
 });
 

@@ -26,12 +26,13 @@ Use the configured `mi_health` MCP server. Never ask the user to paste a Worker 
 - `health_me`: current Xiaomi account login state and non-secret account identity.
 - `health_relatives`: authorized relatives available for queries.
 - `health_login_status`: current session state and login method.
+- `health_login_refresh`: explicitly refresh the session from configured account secrets without returning credentials.
 
 Use `days: 1` for today or last night, `days: 7` for an unspecified recent trend, and the user's explicit value otherwise. The supported range is 1 to 30 days.
 
 ## Handle Login
 
-When a health query reports an authentication or session error, call `health_login_status`. Recommend the configured `XIAOMI_USER_ID` and `XIAOMI_PASS_TOKEN` secrets. `health_login_start` and `health_login_poll` exist for compatibility, but Xiaomi can reject QR login with error `70036`; do not describe QR login as verified or automatically retry it.
+When a health query reports an authentication or session error, call `health_login_status`. If the user asks to refresh after configuring `XIAOMI_USER_ID`, `XIAOMI_PASS_TOKEN`, and the matching browser `XIAOMI_DEVICE_ID`, call `health_login_refresh`. Do not call it speculatively because it performs an account login exchange. `health_login_start` and `health_login_poll` exist for compatibility, but Xiaomi can reject QR login with error `70036`; do not describe QR login as verified or automatically retry it.
 
 ## Explain Results
 

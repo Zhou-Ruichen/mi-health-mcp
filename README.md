@@ -33,14 +33,15 @@ npx wrangler deploy
 
 ### passToken 登录
 
-推荐将 Xiaomi Account 的 `userId` 和 `passToken` 作为 Cloudflare Secret 设置。Worker 会用它们换取 `sid=miothealth` 的短期健康 API session；原始 `passToken` 不会写入 KV、日志或 MCP 返回。
+推荐将 Xiaomi Account 浏览器 Cookie 中的 `userId`、`passToken` 和 `deviceId` 作为 Cloudflare Secret 设置。`deviceId` 通常以 `wb_` 开头。Worker 会用它们换取 `sid=miothealth` 的短期健康 API session；原始 `passToken` 不会写入 KV、日志或 MCP 返回。
 
 ```bash
 npx wrangler secret put XIAOMI_USER_ID
 npx wrangler secret put XIAOMI_PASS_TOKEN
+npx wrangler secret put XIAOMI_DEVICE_ID
 ```
 
-也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。两个 Secret 必须同时设置，不能写入 `wrangler.toml`。
+也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。
 
 KV binding 名必须保持为 `MI_HEALTH_KV`。`AUTH_TOKEN`、`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须使用 Cloudflare Secret，不要写入源码、配置文件或 Git。
 
@@ -78,7 +79,7 @@ hermes cron edit <job-id> --add-skill mi-health
 
 ## 使用流程
 
-1. 配置 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 后调用 `health_login_status`，Worker 会换取或恢复 `miothealth` session。
+1. 配置三个小米账号 Secret 后调用 `health_login_refresh`，Worker 会换取并缓存 `miothealth` session；失败时不会删除当前缓存会话。
 2. 使用 `health_me` 确认当前账号，再调用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询本人数据。
 3. 查询亲友时先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
 
@@ -90,6 +91,7 @@ hermes cron edit <job-id> --add-skill mi-health
 
 - `health_me`：返回当前登录状态和 `user_id`，不返回凭证。
 - `health_login_status`：返回当前健康 API session 是否可用及登录方式，不返回凭证。
+- `health_login_refresh`：使用小米账号 Secret 强制刷新 session，失败时保留现有缓存会话。
 - `health_relatives`：列出可查询亲友的 `relative_uid` 和备注。
 - `health_latest`：查询最新的睡眠、心率和步数摘要。
 - `health_sleep`：查询最近 1 至 30 天的每日睡眠摘要，每天最多一条。
