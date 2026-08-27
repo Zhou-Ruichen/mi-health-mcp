@@ -37,7 +37,7 @@ npx wrangler secret put XIAOMI_PASS_TOKEN
 npx wrangler secret put XIAOMI_DEVICE_ID
 ```
 
-也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。
+也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 可选，设置时应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。
 
 KV binding 名必须保持为 `MI_HEALTH_KV`。`AUTH_TOKEN`、`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须使用 Cloudflare Secret，不要写入源码、配置文件或 Git。
 
@@ -75,8 +75,8 @@ hermes cron edit <job-id> --add-skill mi-health
 
 ## 使用流程
 
-1. 配置三个小米账号 Secret 后调用 `health_login_refresh`，Worker 会换取并缓存 `miothealth` session；失败时不会删除当前缓存会话。
-2. 使用 `health_me` 确认当前账号，再调用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps` 查询本人数据。
+1. 配置 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 后调用 `health_login_refresh`；`XIAOMI_DEVICE_ID` 为可选 Secret，用于在需要时指定取得该 `passToken` 的浏览器会话。Worker 会换取并缓存 `miothealth` session；失败时不会删除当前缓存会话。
+2. 使用 `health_me` 确认当前账号；查询单项原始摘要时调用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps`，需要趋势分析时优先调用 `health_analyze` 并传入用户当前 IANA 时区。
 3. 查询亲友时先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
 
 `health_login_start` 和 `health_login_poll` 仅为兼容保留。该二维码流程在部分账号会被 Xiaomi 拒绝并返回 `70036`，小米运动健康 App 也可能提示二维码不受支持；本项目不把它描述为已验证可用的登录方式。
@@ -90,6 +90,7 @@ hermes cron edit <job-id> --add-skill mi-health
 - `health_login_refresh`：使用小米账号 Secret 强制刷新 session，失败时保留现有缓存会话。
 - `health_relatives`：列出可查询亲友的 `relative_uid` 和备注。
 - `health_latest`：查询最新的睡眠、心率和步数摘要。
+- `health_analyze`：默认查询 30 天，以最近 7 个完整日和此前记录建立个人基线；分离未结束的当日活动，报告缺失日期、同步延迟、睡眠阶段完整性和心率采样质量，输出非诊断性的 robust statistics。
 - `health_sleep`：查询最近 1 至 30 天的每日睡眠摘要，每天最多一条。
 - `health_heart`：查询最近 1 至 30 天的每日心率统计，不返回全部采样点。
 - `health_steps`：查询最近 1 至 30 天的每日步数摘要，每天最多一条。
@@ -103,6 +104,19 @@ hermes cron edit <job-id> --add-skill mi-health
   "days": 7
 }
 ```
+
+趋势分析示例：
+
+```json
+{
+  "target": "self",
+  "days": 30,
+  "recent_days": 7,
+  "timezone": "Europe/Berlin"
+}
+```
+
+`health_analyze` 不重算健康 API 已返回的日期；`timezone` 只用于识别当前自然日，把当日步数和每日心率标为 `partial` 并排除在完整日基线之外。睡眠按起床日期视为已完成记录。同一日期存在重复摘要时，分析器会先按有效测量、采样或睡眠阶段完整性、记录时间和稳定键确定性地选择一条。`recent_days` 表示最近的自然日窗口；缺失或因质量不足被排除的日期不会由更早记录补位。结果先返回 `data_quality`：`missing_dates` 表示当天记录缺失，`missing_measurements` 表示记录存在但目标数值为空、非数值或负数；两者均按未知处理而不是按 0 处理。结果还会报告最新数据同步延迟、睡眠阶段完整率和心率采样质量。低于完整日采样数中位数 50% 的日期列入 `low_sample_dates`，缺少有效采样数的日期列入 `unknown_sample_dates`；两者都不进入心率趋势。趋势比较使用未舍入的 median、MAD、IQR 和 robust z-score，输出时才舍入；样本不足时返回 `insufficient_data`，不会硬给趋势结论。所有比较均为个人历史摘要，不能用于疾病诊断或用药建议。
 
 ## 使用边界
 

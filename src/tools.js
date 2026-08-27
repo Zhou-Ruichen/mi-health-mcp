@@ -1,3 +1,4 @@
+import { analyzeHealthSeries } from "./analysis.js";
 import {
   getAuthStatus,
   getHealthMe,
@@ -27,10 +28,10 @@ const targetProperties = {
   },
   relative_uid: {
     oneOf: [
-      { type: "string", pattern: "^[0-9]+$" },
-      { type: "integer" },
+      { type: "string", pattern: "^(?:0*[1-9][0-9]*)$" },
+      { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
     ],
-    description: "target=relative 时必填。先调用 health_relatives 获取。",
+    description: "target=relative 时必填，必须是正整数或正数字符串。先调用 health_relatives 获取。",
   },
 };
 
@@ -43,6 +44,15 @@ const targetSchema = {
     {
       if: { properties: { target: { const: "relative" } }, required: ["target"] },
       then: { required: ["relative_uid"] },
+    },
+    {
+      if: {
+        anyOf: [
+          { not: { required: ["target"] } },
+          { properties: { target: { const: "self" } }, required: ["target"] },
+        ],
+      },
+      then: { not: { required: ["relative_uid"] } },
     },
   ],
   additionalProperties: false,
@@ -64,11 +74,46 @@ const daysSchema = {
   additionalProperties: false,
 };
 
+const analysisSchema = {
+  type: "object",
+  properties: {
+    ...targetProperties,
+    days: {
+      type: "integer",
+      minimum: 8,
+      maximum: 30,
+      default: 30,
+      description: "分析窗口天数，默认 30，范围 8 到 30。",
+    },
+    recent_days: {
+      type: "integer",
+      minimum: 3,
+      maximum: 14,
+      default: 7,
+      description: "近期完整日窗口，默认 7；必须小于 days。",
+    },
+    timezone: {
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+      default: "UTC",
+      description: "用于识别当日未结束记录的 IANA 时区，例如 Europe/Berlin；不重算接口返回的日期。",
+    },
+  },
+  allOf: targetSchema.allOf,
+  additionalProperties: false,
+};
+
 export const TOOLS = [
   {
     name: "health_latest",
     description: "查询本人或指定亲友最新的睡眠、心率和步数摘要。用户说“我、我的、本人”时 target=self；说“亲友、家人、指定用户”时 target=relative 并提供 relative_uid。",
     inputSchema: targetSchema,
+  },
+  {
+    name: "health_analyze",
+    description: "基于个人历史基线分析步数、睡眠和每日心率摘要。默认比较最近 7 个完整日与此前数据，先报告部分日、缺失、同步和采样质量；结果仅供非诊断性趋势参考。",
+    inputSchema: analysisSchema,
   },
   {
     name: "health_sleep",
@@ -122,28 +167,174 @@ export const TOOLS = [
   },
 ];
 
+export class ToolPublicError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ToolPublicError";
+  }
+}
+
+export class ToolValidationError extends ToolPublicError {
+  constructor(message) {
+    super(message);
+    this.name = "ToolValidationError";
+  }
+}
+
+const toolByName = new Map(TOOLS.map((tool) => [tool.name, tool]));
+
+function assertToolValidation(condition, message) {
+  if (!condition) throw new ToolValidationError(message);
+}
+
+function isPositiveRelativeUid(value) {
+  return (
+    (typeof value === "number" && Number.isSafeInteger(value) && value > 0) ||
+    (typeof value === "string" && /^(?:0*[1-9][0-9]*)$/.test(value))
+  );
+}
+
+function validateToolArguments(name, args) {
+  const tool = toolByName.get(name);
+  if (!tool) throw new ToolValidationError(`未知工具：${name}`);
+  assertToolValidation(
+    args && typeof args === "object" && !Array.isArray(args),
+    "arguments 必须是 JSON 对象",
+  );
+
+  const allowed = new Set(Object.keys(tool.inputSchema.properties || {}));
+  const unknown = Object.keys(args).filter((key) => !allowed.has(key));
+  assertToolValidation(
+    unknown.length === 0,
+    `工具 ${name} 不支持参数：${unknown.join(", ")}`,
+  );
+
+  if (allowed.has("target")) {
+    const target = args.target === undefined ? "self" : args.target;
+    assertToolValidation(target === "self" || target === "relative", "target 必须是 self 或 relative");
+    if (target === "self") {
+      assertToolValidation(
+        !Object.hasOwn(args, "relative_uid"),
+        "target=self 时不允许提供 relative_uid",
+      );
+    } else {
+      assertToolValidation(
+        isPositiveRelativeUid(args.relative_uid),
+        "target=relative 时必须提供正整数 relative_uid；请先调用 health_relatives",
+      );
+    }
+  }
+
+  if (name === "health_sleep" || name === "health_heart" || name === "health_steps") {
+    parseDays(args);
+  }
+  if (name === "health_analyze") parseAnalysisArgs(args);
+}
+
 function parseDays(args) {
   if (args.days === undefined) return 7;
   if (!Number.isInteger(args.days) || args.days < 1 || args.days > 30) {
-    throw new Error("days 必须是 1 到 30 的整数");
+    throw new ToolValidationError("days 必须是 1 到 30 的整数");
   }
   return args.days;
+}
+
+function currentDateInTimezone(timezone, now = Date.now()) {
+  let formatter;
+  try {
+    formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+  } catch {
+    throw new ToolValidationError("timezone 必须是有效的 IANA 时区，例如 Europe/Berlin");
+  }
+  const parts = Object.fromEntries(
+    formatter.formatToParts(new Date(now)).map((part) => [part.type, part.value]),
+  );
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+function parseAnalysisArgs(args) {
+  const days = args.days === undefined ? 30 : args.days;
+  const recentDays = args.recent_days === undefined ? 7 : args.recent_days;
+  const timezone = args.timezone === undefined ? "UTC" : args.timezone;
+  if (!Number.isInteger(days) || days < 8 || days > 30) {
+    throw new ToolValidationError("days 必须是 8 到 30 的整数");
+  }
+  if (!Number.isInteger(recentDays) || recentDays < 3 || recentDays > 14) {
+    throw new ToolValidationError("recent_days 必须是 3 到 14 的整数");
+  }
+  if (recentDays >= days) {
+    throw new ToolValidationError("recent_days 必须小于 days");
+  }
+  if (typeof timezone !== "string" || timezone.length < 1 || timezone.length > 64) {
+    throw new ToolValidationError("timezone 必须是 1 到 64 个字符的 IANA 时区");
+  }
+  currentDateInTimezone(timezone);
+  return { days, recentDays, timezone };
 }
 
 function parseTarget(args) {
   const target = args.target === undefined ? "self" : args.target;
   if (target !== "self" && target !== "relative") {
-    throw new Error("target 必须是 self 或 relative");
+    throw new ToolValidationError("target 必须是 self 或 relative");
   }
-  if (target === "self") return { target };
+  if (target === "self") {
+    if (Object.hasOwn(args, "relative_uid")) {
+      throw new ToolValidationError("target=self 时不允许提供 relative_uid");
+    }
+    return { target };
+  }
   const relativeUid = args.relative_uid;
-  const validUid =
-    (typeof relativeUid === "number" && Number.isInteger(relativeUid)) ||
-    (typeof relativeUid === "string" && /^\d+$/.test(relativeUid));
+  const validUid = isPositiveRelativeUid(relativeUid);
   if (!validUid) {
-    throw new Error("target=relative 时必须提供有效的 relative_uid；请先调用 health_relatives");
+    throw new ToolValidationError("target=relative 时必须提供正整数 relative_uid；请先调用 health_relatives");
   }
   return { target, relative_uid: String(relativeUid) };
+}
+
+async function getHealthAnalysis(env, args, fetchImpl) {
+  const target = parseTarget(args);
+  const { days, recentDays, timezone } = parseAnalysisArgs(args);
+  const now = Date.now();
+  const steps = await getHealthSeries(env, "steps", days, target, fetchImpl, now);
+  const sleep = await getHealthSeries(env, "sleep", days, target, fetchImpl, now);
+  const heartRate = await getHealthSeries(env, "heart_rate", days, target, fetchImpl, now);
+  const currentDate = currentDateInTimezone(timezone, now);
+  const analysis = analyzeHealthSeries(
+    {
+      steps: steps.data,
+      sleep: sleep.data,
+      heart_rate: heartRate.data,
+    },
+    {
+      currentDate,
+      days,
+      recentDays,
+      nowSeconds: Math.floor(now / 1000),
+    },
+  );
+  const identity = target.target === "self"
+    ? { target: "self", user_id: steps.user_id || null }
+    : { target: "relative", relative_uid: steps.relative_uid };
+  return {
+    ...identity,
+    period: {
+      current_date: currentDate,
+      days,
+      recent_days: recentDays,
+      timezone,
+    },
+    ...analysis,
+    caveats: [
+      "当前日步数和每日心率仅作为部分日展示，不进入完整日基线。",
+      "睡眠阶段全为零但总时长有效时，阶段数据按不可用处理。",
+      "结果基于个人历史摘要，仅供非诊断性趋势参考。",
+    ],
+  };
 }
 
 async function withAuthTracking(env, fetchImpl, operation) {
@@ -156,7 +347,7 @@ async function withAuthTracking(env, fetchImpl, operation) {
         await exchangePassTokenSession(env, fetchImpl);
         return operation();
       }
-      throw new Error(`小米凭证已过期，请重新扫码登录：${error.message}`);
+      throw new ToolPublicError(`小米凭证已过期，请重新扫码登录：${error.message}`);
     }
     throw error;
   }
@@ -168,14 +359,16 @@ export async function callTool(
   env,
   fetchImpl = fetch,
 ) {
-  if (!args || typeof args !== "object" || Array.isArray(args)) {
-    throw new Error("arguments 必须是 JSON 对象");
-  }
+  validateToolArguments(name, args);
 
   switch (name) {
     case "health_latest":
       return withAuthTracking(env, fetchImpl, () =>
         getLatestHealth(env, parseTarget(args), fetchImpl),
+      );
+    case "health_analyze":
+      return withAuthTracking(env, fetchImpl, () =>
+        getHealthAnalysis(env, args, fetchImpl),
       );
     case "health_sleep":
       return withAuthTracking(env, fetchImpl, () =>
@@ -211,6 +404,6 @@ export async function callTool(
     case "health_login_poll":
       return pollQrLogin(env, fetchImpl);
     default:
-      throw new Error(`未知工具：${name}`);
+      throw new ToolValidationError(`未知工具：${name}`);
   }
 }

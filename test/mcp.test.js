@@ -231,6 +231,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
     listed.json.result.tools.map((tool) => tool.name),
     [
       "health_latest",
+      "health_analyze",
       "health_sleep",
       "health_heart",
       "health_steps",
@@ -250,6 +251,72 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
   });
   assert.equal(notification.response.status, 202);
   assert.equal(notification.json, null);
+});
+
+test("MCP enforces each tool argument contract before dispatch", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const env = envWithKv();
+  const cases = [
+    ["health_auth_status", { unexpected: true }, /unexpected|参数|argument/i],
+    ["health_latest", { target: "self", relative_uid: "42" }, /relative_uid|self|参数/i],
+    ["health_latest", { target: "relative", relative_uid: 0 }, /relative_uid|positive|有效/i],
+    ["health_steps", { days: 7, unexpected: true }, /unexpected|参数|argument/i],
+    ["health_analyze", { days: 8, recent_days: 2, timezone: "UTC" }, /recent_days|3 到 14/i],
+    ["health_analyze", { days: 8, recent_days: 3, timezone: "UTC", unexpected: true }, /unexpected|参数|argument/i],
+  ];
+
+  for (const [name, args, expected] of cases) {
+    const result = await callMcp(worker, env, {
+      jsonrpc: "2.0",
+      id: name,
+      method: "tools/call",
+      params: { name, arguments: args },
+    });
+    assert.equal(result.json.result.isError, true, name);
+    assert.match(result.json.result.content[0].text, expected, name);
+  }
+
+  for (const [index, args] of [null, false, ""].entries()) {
+    const result = await callMcp(worker, env, {
+      jsonrpc: "2.0",
+      id: `non-object-${index}`,
+      method: "tools/call",
+      params: { name: "health_auth_status", arguments: args },
+    });
+    assert.equal(result.json.result.isError, true, String(args));
+    assert.match(result.json.result.content[0].text, /JSON 对象|arguments/i);
+  }
+
+  const unknown = await callMcp(worker, env, {
+    jsonrpc: "2.0",
+    id: "unknown-tool",
+    method: "tools/call",
+    params: { name: "not_a_tool", arguments: { unexpected: true } },
+  });
+  assert.equal(unknown.json.result.isError, true);
+  assert.match(unknown.json.result.content[0].text, /未知工具/);
+});
+
+test("MCP hides messages from untrusted thrown errors", async () => {
+  const fetchImpl = async () => {
+    throw new Error(
+      "Bearer bearer-leak passToken=pass-leak https://example.test/callback?ticket=ticket-leak",
+    );
+  };
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(), {
+    jsonrpc: "2.0",
+    id: "untrusted-error",
+    method: "tools/call",
+    params: { name: "health_login_start", arguments: {} },
+  });
+
+  assert.equal(result.json.result.isError, true);
+  assert.match(result.json.result.content[0].text, /详情已隐藏/);
+  assert.doesNotMatch(
+    JSON.stringify(result.json),
+    /bearer-leak|pass-leak|ticket-leak|example\.test/i,
+  );
 });
 
 test("health_auth_status reports metadata without exposing credentials", async () => {
@@ -378,6 +445,57 @@ test("health_latest defaults to the signed-in account and uses the self data end
   assert.doesNotMatch(JSON.stringify(result.json), /service-token-secret/);
 });
 
+test("health_analyze compares completed days and returns data-quality metadata", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const currentDate = new Date().toISOString().slice(0, 10);
+  const dates = Array.from({ length: 8 }, (_, index) => {
+    const current = Date.parse(`${currentDate}T12:00:00Z`);
+    return new Date(current - (7 - index) * 86400 * 1000).toISOString().slice(0, 10);
+  });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": (url, options, params) => {
+      const data_list = dates.map((date, index) => {
+        const time = Date.parse(`${date}T12:00:00Z`) / 1000;
+        const values = {
+          steps: { steps: index === 7 ? 50 : index < 4 ? 1000 : 3000 + index * 10 },
+          sleep: {
+            total_duration: 420 + index,
+            sleep_deep_duration: index === 1 ? 0 : 100,
+            sleep_light_duration: index === 1 ? 0 : 250,
+          },
+          heart_rate: { bpm: index === 7 ? 70 : index < 4 ? 76 : 85 + index },
+        };
+        return { time, zone_offset: 0, value: JSON.stringify(values[params.key]) };
+      });
+      return { code: 0, result: { data_list, has_more: false } };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "analyze",
+    method: "tools/call",
+    params: {
+      name: "health_analyze",
+      arguments: { target: "self", days: 8, recent_days: 3, timezone: "UTC" },
+    },
+  });
+
+  assert.equal(result.json.result.isError, undefined);
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(value.period.current_date, currentDate);
+  assert.equal(value.period.days, 8);
+  assert.equal(value.period.recent_days, 3);
+  assert.equal(value.period.timezone, "UTC");
+  assert.equal(value.current_day.steps.status, "partial");
+  assert.equal(value.current_day.steps.steps, 50);
+  assert.equal(value.metrics.steps.recent.n, 3);
+  assert.equal(value.metrics.steps.baseline.n, 4);
+  assert.equal(value.data_quality.sleep_stages.unavailable_n, 1);
+  assert.equal(fetchImpl.calls.length, 3);
+  assert.doesNotMatch(JSON.stringify(result.json), /service-token-secret/);
+});
+
 test("self daily series defaults to seven days, accepts empty data, and rejects over 30", async () => {
   const kv = new MemoryKv({
     [TOKEN_KEY]: JSON.stringify(tokenRecord()),
@@ -444,7 +562,7 @@ test("self steps, sleep, and heart queries use the self data endpoint", async ()
       jsonrpc: "2.0",
       id: name,
       method: "tools/call",
-      params: { name, arguments: { target: "self", relative_uid: "42", days: 1 } },
+      params: { name, arguments: { target: "self", days: 1 } },
     });
     const value = JSON.parse(result.json.result.content[0].text);
     assert.equal(value.target, "self");
@@ -997,6 +1115,30 @@ test("a health API region error is reported without exposing the Xiaomi response
   assert.equal(result.json.result.isError, true);
   assert.match(result.json.result.content[0].text, /地区不匹配/);
   assert.doesNotMatch(JSON.stringify(result.json), /synthetic-account/);
+});
+
+test("a generic Xiaomi API error omits the upstream message", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": {
+      code: 40002,
+      message: "upstream failure for account-leak https://example.test/?ticket=ticket-leak",
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "generic-api-error",
+    method: "tools/call",
+    params: { name: "health_steps", arguments: { target: "self", days: 1 } },
+  });
+
+  assert.equal(result.json.result.isError, true);
+  assert.match(result.json.result.content[0].text, /code=40002/);
+  assert.doesNotMatch(
+    JSON.stringify(result.json),
+    /account-leak|ticket-leak|example\.test/i,
+  );
 });
 
 test("a Xiaomi 401 marks the stored credential expired", async () => {

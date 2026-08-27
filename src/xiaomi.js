@@ -518,7 +518,7 @@ async function encryptedRequest(fetchImpl, token, method, path, params) {
       });
     }
     throw new XiaomiApiError(
-      `小米接口错误（code=${Number.isFinite(code) ? code : "unknown"}）：${message}`,
+      `小米接口错误（code=${Number.isFinite(code) ? code : "unknown"}）`,
       {
         code: Number.isFinite(code) ? code : null,
         authExpired: authFailure(code, message),

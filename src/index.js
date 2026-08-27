@@ -1,5 +1,6 @@
 import { timingSafeTextEqual } from "./crypto.js";
-import { callTool, TOOLS } from "./tools.js";
+import { callTool, ToolPublicError, TOOLS } from "./tools.js";
+import { XiaomiError } from "./xiaomi.js";
 
 const PROTOCOL_VERSION = "2024-11-05";
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -60,7 +61,17 @@ function toolResult(value) {
 }
 
 function toolError(error) {
-  const message = String(error?.message || error || "未知错误").slice(0, 2000);
+  const publicError = error instanceof ToolPublicError || error instanceof XiaomiError;
+  const message = publicError
+    ? String(error?.message || "请求失败")
+      .replace(/https?:\/\/[^\s"'<>]+/gi, "[REDACTED_URL]")
+      .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+      .replace(
+        /\b(passToken|cUserId|serviceToken|ssecurity|cookie|authorization|token|password|secret)\b\s*[:=]\s*[^\s,;]+/gi,
+        "$1=[REDACTED]",
+      )
+      .slice(0, 2000)
+    : "请求失败；详情已隐藏";
   return {
     content: [
       {
@@ -98,9 +109,9 @@ export async function handleRpc(message, env, fetchImpl = fetch) {
       result: {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "mi-health-mcp", version: "1.0.0" },
+        serverInfo: { name: "mi-health-mcp", version: "1.1.0" },
         instructions:
-          "查询当前登录小米账号本人或已授权亲友的健康数据。默认 target=self；查询亲友前先调用 health_relatives，并以 target=relative 和 relative_uid 指定目标。推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 自动换取 miothealth 会话。二维码登录仅保留兼容，Xiaomi 可能返回 70036。",
+          "查询当前登录小米账号本人或已授权亲友的健康数据。默认 target=self；查询亲友前先调用 health_relatives，并以 target=relative 和 relative_uid 指定目标。需要趋势或合理分析时优先调用 health_analyze，并传入用户当前 IANA 时区以区分未结束的当日数据。推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 自动换取 miothealth 会话。二维码登录仅保留兼容，Xiaomi 可能返回 70036。",
       },
     };
   }
@@ -129,7 +140,7 @@ export async function handleRpc(message, env, fetchImpl = fetch) {
     try {
       const value = await callTool(
         name,
-        params.arguments || {},
+        Object.hasOwn(params, "arguments") ? params.arguments : {},
         env,
         fetchImpl,
       );
