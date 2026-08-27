@@ -627,6 +627,7 @@ test("30-day self series stay compact and use each record's zone offset", async 
     const text = result.json.result.content[0].text;
     const value = JSON.parse(text);
     assert.equal(value.data.length, 30);
+    assert.equal(text, JSON.stringify(value));
     assert.ok(text.length < 20_000, `${name} result should remain compact`);
   }
 

@@ -53,7 +53,7 @@ function toolResult(value) {
     content: [
       {
         type: "text",
-        text: JSON.stringify(value, null, 2),
+        text: JSON.stringify(value),
       },
     ],
   };
@@ -65,7 +65,7 @@ function toolError(error) {
     content: [
       {
         type: "text",
-        text: JSON.stringify({ ok: false, error: message }, null, 2),
+        text: JSON.stringify({ ok: false, error: message }),
       },
     ],
     isError: true,
