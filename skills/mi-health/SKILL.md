@@ -1,10 +1,11 @@
 ---
 name: mi-health
-description: Query and explain Xiaomi Mi Fitness steps, sleep, heart rate, account status, and authorized relative data through the mi_health MCP server. Use for questions about my health, recent health trends, family health data, Xiaomi health login, or scheduled health summaries.
+description: Query and explain Xiaomi Mi Fitness steps, sleep, heart rate, account status, and authorized relative data through the mi_health MCP server. Use for personal or family health questions, recent health trends, Xiaomi health login, scheduled health summaries, or explicitly requested health entries, reviews, reminders, and calendar planning.
 license: GPL-3.0
 metadata:
   hermes:
     tags: [health, xiaomi, mcp]
+    related_skills: [journal, weekly-review-planning, apple-reminders, calendar]
 ---
 
 # Xiaomi Health Queries
@@ -32,7 +33,14 @@ Use `days: 1` for today or last night, `days: 7` for an unspecified recent trend
 
 ## Handle Login
 
-When a health query reports an authentication or session error, call `health_login_status`. If the user asks to refresh after configuring `XIAOMI_USER_ID`, `XIAOMI_PASS_TOKEN`, and the matching browser `XIAOMI_DEVICE_ID`, call `health_login_refresh`. Do not call it speculatively because it performs an account login exchange. `health_login_start` and `health_login_poll` exist for compatibility, but Xiaomi can reject QR login with error `70036`; do not describe QR login as verified or automatically retry it.
+When a health query reports an authentication or session error, call `health_login_status`. A valid cached QR session can make this tool report `logged_in` without testing newly configured account secrets. Call `health_login_refresh` only when the user explicitly asks to validate or replace that cached session. `XIAOMI_USER_ID` and `XIAOMI_PASS_TOKEN` are required for refresh; a matching browser `XIAOMI_DEVICE_ID` is optional. Do not call refresh speculatively because it performs an account login exchange. `health_login_start` and `health_login_poll` exist for compatibility, but Xiaomi can reject QR login with error `70036`; do not describe QR login as verified or automatically retry it.
+
+## Coordinate With Other Skills
+
+- Do not write health results to notes, memory, reminders, calendars, or task systems unless the user explicitly requests that write.
+- For an explicit journal request, query only the requested dates and measurements, then use `journal` to record a compact factual summary. Preserve missing values as unknown and do not add medical interpretation.
+- For an explicit weekly health review, query up to 7 days with `health_steps`, `health_sleep`, and `health_heart`. Report date coverage and synchronization gaps before interpreting trends. Use `weekly-review-planning` only for planning the review; do not turn measurements into tasks without approval.
+- Use `apple-reminders` or `calendar` only when the user asks for a concrete reminder or event. Do not create one solely because a measurement looks unusual.
 
 ## Explain Results
 
@@ -46,4 +54,4 @@ When a health query reports an authentication or session error, call `health_log
 
 ## Scheduled Use
 
-Do not create, edit, or delete a cron job unless the user explicitly asks. Before attaching this skill, inspect `hermes cron status`, `hermes cron list`, and recent runs to avoid duplicate summaries. Prefer adding `mi-health` to an existing briefing only when its schedule, timezone, delivery target, and model match the requested health summary. Cron prompts must be self-contained and must report authentication failures without exposing credentials or switching to QR login.
+Do not create, edit, or delete a cron job unless the user explicitly asks. Before attaching this skill, inspect `hermes cron status`, `hermes cron list`, and recent runs to avoid duplicate summaries. A job whose prompt forbids tool calls or accepts only its script's JSON cannot use this skill merely by listing it. After account refresh has been verified, prefer at most one daily health summary over high-frequency polling because device synchronization is delayed. Cron prompts must be self-contained and must report authentication failures without exposing credentials or switching to QR login.

@@ -9,4 +9,4 @@ head_sampling_rate = 1
 
 [[kv_namespaces]]
 binding = "MI_HEALTH_KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "c3d5b52df4574046936f9bea334b696e"

@@ -16,11 +16,7 @@ npx wrangler login
 npx wrangler kv namespace create MI_HEALTH_KV
 ```
 
-复制公开模板并将命令输出的 namespace ID 写入本地配置。`wrangler.toml` 已被 Git 忽略，不会提交个人 KV ID：
-
-```bash
-cp wrangler.example.toml wrangler.toml
-```
+将命令输出的 namespace ID 写入 `wrangler.toml` 的 `kv_namespaces[0].id`。KV namespace ID 是 Cloudflare 资源标识，不是访问凭据；公开仓库必须提交 `wrangler.toml`，以便 Workers Builds 识别 Worker 入口和 binding。Fork 后部署前必须替换为自己账号中的 namespace ID。
 
 然后设置访问令牌并部署：
 
