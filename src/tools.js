@@ -6,6 +6,7 @@ import {
   getLoginStatus,
   getLatestHealth,
   getRelatives,
+  getWorkouts,
   hasPassTokenConfiguration,
   markTokenExpired,
   pollQrLogin,
@@ -74,6 +75,20 @@ const daysSchema = {
   additionalProperties: false,
 };
 
+const selfDaysSchema = {
+  type: "object",
+  properties: {
+    days: {
+      type: "integer",
+      minimum: 1,
+      maximum: 30,
+      default: 7,
+      description: "查询天数，默认 7，最多 30。",
+    },
+  },
+  additionalProperties: false,
+};
+
 const analysisSchema = {
   type: "object",
   properties: {
@@ -112,7 +127,7 @@ export const TOOLS = [
   },
   {
     name: "health_analyze",
-    description: "基于个人历史基线分析步数、睡眠和每日心率摘要。默认比较最近 7 个完整日与此前数据，先报告部分日、缺失、同步和采样质量；结果仅供非诊断性趋势参考。",
+    description: "基于个人历史基线分析步数、距离、calories、睡眠和每日心率摘要。默认比较最近 7 个完整日与此前数据，先报告部分日、缺失、同步和采样质量；结果仅供非诊断性趋势参考。",
     inputSchema: analysisSchema,
   },
   {
@@ -129,6 +144,11 @@ export const TOOLS = [
     name: "health_steps",
     description: "查询本人或指定亲友最近的每日步数摘要，每天最多一条。用户说“我、我的、本人”时 target=self；查询亲友时 target=relative 并提供 relative_uid。",
     inputSchema: daysSchema,
+  },
+  {
+    name: "health_workouts",
+    description: "查询本人最近的运动 session 记录（单次运动摘要：类型、开始/结束时间、时长秒数、距离、calories、平均/最高心率，仅透传上游提供的字段）。仅支持本人，暂不支持亲友；不返回原始高频传感器数据。calories 为 Xiaomi 返回值，不解释为 active calories。",
+    inputSchema: selfDaysSchema,
   },
   {
     name: "health_auth_status",
@@ -225,7 +245,7 @@ function validateToolArguments(name, args) {
     }
   }
 
-  if (name === "health_sleep" || name === "health_heart" || name === "health_steps") {
+  if (name === "health_sleep" || name === "health_heart" || name === "health_steps" || name === "health_workouts") {
     parseDays(args);
   }
   if (name === "health_analyze") parseAnalysisArgs(args);
@@ -300,9 +320,11 @@ async function getHealthAnalysis(env, args, fetchImpl) {
   const target = parseTarget(args);
   const { days, recentDays, timezone } = parseAnalysisArgs(args);
   const now = Date.now();
-  const steps = await getHealthSeries(env, "steps", days, target, fetchImpl, now);
-  const sleep = await getHealthSeries(env, "sleep", days, target, fetchImpl, now);
-  const heartRate = await getHealthSeries(env, "heart_rate", days, target, fetchImpl, now);
+  const [steps, sleep, heartRate] = await Promise.all([
+    getHealthSeries(env, "steps", days, target, fetchImpl, now),
+    getHealthSeries(env, "sleep", days, target, fetchImpl, now),
+    getHealthSeries(env, "heart_rate", days, target, fetchImpl, now),
+  ]);
   const currentDate = currentDateInTimezone(timezone, now);
   const analysis = analyzeHealthSeries(
     {
@@ -330,8 +352,8 @@ async function getHealthAnalysis(env, args, fetchImpl) {
     },
     ...analysis,
     caveats: [
-      "当前日步数和每日心率仅作为部分日展示，不进入完整日基线。",
-      "睡眠阶段全为零但总时长有效时，阶段数据按不可用处理。",
+      "当前日步数、距离、calories 和每日心率仅作为部分日展示，不进入完整日基线。",
+      "总睡眠时长有效但阶段字段全为 0 时，表示睡眠阶段明细不可用，不表示深睡或浅睡实际为零。",
       "结果基于个人历史摘要，仅供非诊断性趋势参考。",
     ],
   };
@@ -381,6 +403,10 @@ export async function callTool(
     case "health_steps":
       return withAuthTracking(env, fetchImpl, () =>
         getHealthSeries(env, "steps", parseDays(args), parseTarget(args), fetchImpl),
+      );
+    case "health_workouts":
+      return withAuthTracking(env, fetchImpl, () =>
+        getWorkouts(env, parseDays(args), fetchImpl),
       );
     case "health_auth_status":
       return getAuthStatus(env);

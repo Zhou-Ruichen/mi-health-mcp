@@ -235,6 +235,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_sleep",
       "health_heart",
       "health_steps",
+      "health_workouts",
       "health_auth_status",
       "health_me",
       "health_relatives",
@@ -494,6 +495,260 @@ test("health_analyze compares completed days and returns data-quality metadata",
   assert.equal(value.data_quality.sleep_stages.unavailable_n, 1);
   assert.equal(fetchImpl.calls.length, 3);
   assert.doesNotMatch(JSON.stringify(result.json), /service-token-secret/);
+});
+
+test("health_analyze includes distance and calories in partial day and baselines", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const currentDate = new Date().toISOString().slice(0, 10);
+  const dates = Array.from({ length: 8 }, (_, index) => {
+    const current = Date.parse(`${currentDate}T12:00:00Z`);
+    return new Date(current - (7 - index) * 86400 * 1000).toISOString().slice(0, 10);
+  });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": (url, options, params) => {
+      const data_list = dates.map((date, index) => {
+        const time = Date.parse(`${date}T12:00:00Z`) / 1000;
+        const dailySteps = index === 7 ? 50 : index < 4 ? 1000 : 3000;
+        return {
+          time,
+          zone_offset: 0,
+          value: JSON.stringify(
+            params.key === "steps"
+              ? { steps: dailySteps, distance: dailySteps * 2, calories: dailySteps / 10 }
+              : params.key === "sleep"
+                ? { total_duration: 420 }
+                : { bpm: 70 },
+          ),
+        };
+      });
+      return { code: 0, result: { data_list, has_more: false } };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "analyze-activity",
+    method: "tools/call",
+    params: {
+      name: "health_analyze",
+      arguments: { target: "self", days: 8, recent_days: 3, timezone: "UTC" },
+    },
+  });
+
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.deepEqual(value.current_day.distance, {
+    date: currentDate,
+    distance: 100,
+    status: "partial",
+  });
+  assert.deepEqual(value.current_day.calories, {
+    date: currentDate,
+    calories: 5,
+    status: "partial",
+  });
+  assert.equal(value.metrics.distance.recent.n, 3);
+  assert.equal(value.metrics.distance.recent.median, 6000);
+  assert.equal(value.metrics.distance.baseline.n, 4);
+  assert.equal(value.metrics.distance.baseline.median, 2000);
+  assert.equal(value.metrics.distance.comparison.status, "above_baseline");
+  assert.equal(value.metrics.calories.recent.median, 300);
+  assert.equal(value.metrics.calories.baseline.median, 100);
+  assert.equal(value.metrics.calories.comparison.status, "above_baseline");
+});
+
+test("health_sleep reports sleep_stage_status and keeps raw stage fields", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const base = Date.UTC(2026, 7, 25) / 1000;
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": {
+      code: 0,
+      result: {
+        data_list: [
+          {
+            time: base,
+            value: JSON.stringify({
+              total_duration: 420,
+              sleep_deep_duration: 100,
+              sleep_light_duration: 250,
+              sleep_rem_duration: 70,
+            }),
+          },
+          {
+            time: base + 86400,
+            value: JSON.stringify({
+              total_duration: 390,
+              sleep_deep_duration: 0,
+              sleep_light_duration: 0,
+            }),
+          },
+          {
+            time: base + 2 * 86400,
+            value: JSON.stringify({ sleep_stage: 2 }),
+          },
+        ],
+        has_more: false,
+      },
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "sleep-stage-status",
+    method: "tools/call",
+    params: { name: "health_sleep", arguments: { days: 3 } },
+  });
+  const text = result.json.result.content[0].text;
+  const value = JSON.parse(text);
+
+  assert.equal(value.data.length, 3);
+  const [withStages, zeroStages, noDuration] = value.data;
+  assert.equal(withStages.sleep_stage_status, "available");
+  assert.equal(withStages.sleep_deep_duration, 100);
+  assert.equal(withStages.sleep_light_duration, 250);
+  assert.equal(withStages.sleep_rem_duration, 70);
+  assert.equal(zeroStages.sleep_stage_status, "unavailable");
+  assert.equal(zeroStages.total_duration, 390);
+  assert.equal(zeroStages.sleep_deep_duration, 0);
+  assert.equal(zeroStages.sleep_light_duration, 0);
+  assert.equal(noDuration.sleep_stage_status, "unknown");
+  assert.equal("total_duration" in noDuration, false);
+  assert.doesNotMatch(text, /passToken|serviceToken|ssecurity/);
+});
+
+test("health_workouts returns whitelisted workout sessions for self only", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const start = Date.UTC(2026, 7, 20, 6) / 1000;
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_sport_records_by_time": (url, options, params) => {
+      assert.equal(options.method, "POST");
+      assert.equal("key" in params, false);
+      assert.equal("relative_uid" in params, false);
+      assert.equal(params.limit, 50);
+      return {
+        code: 0,
+        result: {
+          sport_records: [
+            {
+              time: start,
+              zone_offset: 0,
+              category: "outdoor_run",
+              value: JSON.stringify({
+                start_time: start,
+                end_time: start + 1800,
+                duration: 1800,
+                distance: 5000,
+                calories: 350,
+                avg_hrm: 150,
+                max_hrm: 172,
+              }),
+            },
+            {
+              time: start + 86400,
+              zone_offset: 0,
+              value: JSON.stringify({ start_time: start + 86400, duration: 600 }),
+            },
+          ],
+          has_more: false,
+        },
+      };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "workouts",
+    method: "tools/call",
+    params: { name: "health_workouts", arguments: { days: 7 } },
+  });
+  const text = result.json.result.content[0].text;
+  const value = JSON.parse(text);
+
+  assert.equal(value.target, "self");
+  assert.equal(value.user_id, "account-user");
+  assert.equal(value.days, 7);
+  assert.equal(value.data.length, 2);
+  assert.deepEqual(value.data[0], {
+    date: "2026-08-20",
+    time: start,
+    start_time: start,
+    end_time: start + 1800,
+    duration_seconds: 1800,
+    distance: 5000,
+    calories: 350,
+    avg_hr: 150,
+    max_hr: 172,
+    sport_type: "outdoor_run",
+  });
+  assert.deepEqual(value.data[1], {
+    date: "2026-08-21",
+    time: start + 86400,
+    start_time: start + 86400,
+    duration_seconds: 600,
+  });
+  assert.doesNotMatch(text, /service-token-secret|passToken|ssecurity/);
+
+  const relative = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "workouts-relative",
+    method: "tools/call",
+    params: {
+      name: "health_workouts",
+      arguments: { target: "relative", relative_uid: 42 },
+    },
+  });
+  assert.equal(relative.json.result.isError, true);
+  assert.match(relative.json.result.content[0].text, /不支持参数/);
+});
+
+test("health_workouts paginates with next_key and reports empty windows", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const start = Date.UTC(2026, 7, 20, 6) / 1000;
+  let call = 0;
+  const seenParams = [];
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_sport_records_by_time": (url, options, params) => {
+      call += 1;
+      seenParams.push(params.next_key);
+      if (call === 1) {
+        return {
+          code: 0,
+          result: {
+            sport_records: [
+              {
+                time: start,
+                value: JSON.stringify({ start_time: start, duration: 3600, distance: 10000 }),
+              },
+            ],
+            has_more: true,
+            next_key: "cursor-1",
+          },
+        };
+      }
+      return { code: 0, result: { sport_records: [], has_more: false } };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "workouts-pages",
+    method: "tools/call",
+    params: { name: "health_workouts", arguments: { days: 7 } },
+  });
+  const value = JSON.parse(result.json.result.content[0].text);
+  assert.equal(call, 2);
+  assert.deepEqual(seenParams, [undefined, "cursor-1"]);
+  assert.equal(value.data.length, 1);
+  assert.equal(value.data[0].duration_seconds, 3600);
+
+  const empty = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "workouts-empty",
+    method: "tools/call",
+    params: { name: "health_workouts", arguments: {} },
+  });
+  const emptyValue = JSON.parse(empty.json.result.content[0].text);
+  assert.deepEqual(emptyValue.data, []);
+  assert.match(emptyValue.message, /暂无运动记录/);
 });
 
 test("self daily series defaults to seven days, accepts empty data, and rejects over 30", async () => {

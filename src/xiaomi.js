@@ -18,6 +18,8 @@ const RELATIVES_LIST_PATH = "/app/v1/relatives/get_relative_list";
 const RELATIVES_LATEST_PATH = "/app/v1/relatives/get_latest_data";
 const RELATIVES_AGGREGATED_PATH = "/app/v1/relatives/get_aggregated_data";
 const SELF_FITNESS_BY_TIME_PATH = "/app/v1/data/get_fitness_data_by_time";
+const SELF_SPORT_BY_TIME_PATH = "/app/v1/data/get_sport_records_by_time";
+const SPORT_PAGE_LIMIT = 50;
 
 const API_USER_AGENT = "Android-12-3.53.1-vivo-V2284A";
 const LOGIN_USER_AGENT =
@@ -596,29 +598,37 @@ export async function getHealthMe(env, fetchImpl = fetch) {
   };
 }
 
-async function getSelfFitnessItems(env, token, key, start, end, fetchImpl) {
-  const items = [];
+async function getSelfPagedRecords(token, path, baseParams, listKey, fetchImpl) {
+  const records = [];
   const seenNextKeys = new Set();
   let nextKey;
   while (true) {
-    const params = { start_time: start, end_time: end, key };
-    if (nextKey) params.next_key = nextKey;
     const response = await encryptedRequest(
       fetchImpl,
       token,
       "POST",
-      SELF_FITNESS_BY_TIME_PATH,
-      params,
+      path,
+      nextKey ? { ...baseParams, next_key: nextKey } : baseParams,
     );
     const result = responseResult(response);
-    if (Array.isArray(result.data_list)) items.push(...result.data_list);
-    if (!result.has_more) return items;
+    if (Array.isArray(result[listKey])) records.push(...result[listKey]);
+    if (!result.has_more) return records;
     if (typeof result.next_key !== "string" || !result.next_key || seenNextKeys.has(result.next_key)) {
-      throw new XiaomiApiError("小米本人健康数据分页响应异常");
+      throw new XiaomiApiError("小米健康数据分页响应异常");
     }
     seenNextKeys.add(result.next_key);
     nextKey = result.next_key;
   }
+}
+
+function getSelfFitnessItems(token, key, start, end, fetchImpl) {
+  return getSelfPagedRecords(
+    token,
+    SELF_FITNESS_BY_TIME_PATH,
+    { start_time: start, end_time: end, key },
+    "data_list",
+    fetchImpl,
+  );
 }
 
 function finiteNumber(value) {
@@ -735,6 +745,13 @@ function compactSleep(record) {
   };
   const duration = sleepDuration(value);
   if (duration > 0) output.total_duration = duration;
+  output.sleep_stage_status = [
+    output.sleep_deep_duration,
+    output.sleep_light_duration,
+    output.sleep_rem_duration,
+  ].some((seconds) => seconds > 0)
+    ? "available"
+    : duration > 0 ? "unavailable" : "unknown";
   const score = finiteNumber(value.sleep_score) ?? finiteNumber(value.score);
   if (score !== null) output.sleep_score = score;
   const bedtime = finiteNumber(value.bedtime) ||
@@ -842,6 +859,33 @@ function compactSeries(items, metric, target) {
     compactRelativeRecord(record, metric));
 }
 
+function compactWorkout(item) {
+  const value = parseEmbeddedValue(item?.value);
+  const payload = value && typeof value === "object" && !Array.isArray(value)
+    ? value
+    : {};
+  const startTime = finiteNumber(payload.start_time) || finiteNumber(item?.time) || 0;
+  if (!startTime) return null;
+  const output = {
+    date: localDate(startTime, recordZoneOffset(item)),
+    time: finiteNumber(item?.time) || startTime,
+    start_time: startTime,
+  };
+  const endTime = finiteNumber(payload.end_time);
+  if (endTime !== null) output.end_time = endTime;
+  const duration = finiteNumber(payload.duration);
+  if (duration !== null && duration > 0) output.duration_seconds = duration;
+  const numbers = copyNumbers(payload, ["distance", "calories", "avg_hrm", "max_hrm"]);
+  if (numbers.distance !== undefined) output.distance = numbers.distance;
+  if (numbers.calories !== undefined) output.calories = numbers.calories;
+  if (numbers.avg_hrm !== undefined) output.avg_hr = numbers.avg_hrm;
+  if (numbers.max_hrm !== undefined) output.max_hr = numbers.max_hrm;
+  const sportType = [item?.category, item?.key, payload.sport_type]
+    .find((candidate) => typeof candidate === "string" && candidate.trim());
+  if (sportType) output.sport_type = sportType.trim();
+  return output;
+}
+
 function latestItemTime(item) {
   return Math.max(
     finiteNumber(item?.time) || 0,
@@ -880,9 +924,9 @@ export async function getLatestHealth(env, target, fetchImpl = fetch, now = Date
     const today = healthQueryWindow(now, 1);
     const sleepWindow = healthQueryWindow(now, 2);
     const [sleepItems, heartItems, stepItems] = await Promise.all([
-      getSelfFitnessItems(env, token, "sleep", sleepWindow.start, sleepWindow.end, fetchImpl),
-      getSelfFitnessItems(env, token, "heart_rate", today.start, today.end, fetchImpl),
-      getSelfFitnessItems(env, token, "steps", today.start, today.end, fetchImpl),
+      getSelfFitnessItems(token, "sleep", sleepWindow.start, sleepWindow.end, fetchImpl),
+      getSelfFitnessItems(token, "heart_rate", today.start, today.end, fetchImpl),
+      getSelfFitnessItems(token, "steps", today.start, today.end, fetchImpl),
     ]);
     return latestResponse(
       {
@@ -924,6 +968,34 @@ export async function getLatestHealth(env, target, fetchImpl = fetch, now = Date
   return output;
 }
 
+export async function getWorkouts(env, days, fetchImpl = fetch, now = Date.now()) {
+  const { start, end } = healthQueryWindow(now, days);
+  const token = await requireSelfToken(env, fetchImpl);
+  const items = await getSelfPagedRecords(
+    token,
+    SELF_SPORT_BY_TIME_PATH,
+    { start_time: start, end_time: end, limit: SPORT_PAGE_LIMIT },
+    "sport_records",
+    fetchImpl,
+  );
+  const workouts = items
+    .map(compactWorkout)
+    .filter((workout) => workout?.date)
+    .sort((left, right) => left.start_time - right.start_time);
+  const keptDates = new Set([...new Set(workouts.map(({ date }) => date))].slice(-days));
+  const data = workouts.filter(({ date }) => keptDates.has(date));
+  return {
+    target: "self",
+    user_id: token.user_id || null,
+    days,
+    data,
+    message:
+      data.length === 0
+        ? "暂无运动记录（该时间窗口内没有已同步的运动 session）"
+        : undefined,
+  };
+}
+
 function cstTodayWindow(now, days) {
   const shifted = new Date(now + CST_OFFSET_SECONDS * 1000);
   const utcMidnight = Date.UTC(
@@ -955,7 +1027,6 @@ export async function getHealthSeries(
   if (target.target === "self") {
     const token = await requireSelfToken(env, fetchImpl);
     const items = await getSelfFitnessItems(
-      env,
       token,
       metric,
       start,

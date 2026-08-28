@@ -55,7 +55,7 @@ mcp_servers:
 
 ### Hermes skill
 
-仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md) 负责把“我/本人”和“亲友”请求分流到正确工具，并说明紧凑结果的字段含义。仓库公开后，可从原始文件 URL 安装：
+仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.3.0）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
 
 ```bash
 hermes skills install https://raw.githubusercontent.com/<your-github-account>/mi-health-mcp/main/skills/mi-health/SKILL.md
@@ -76,8 +76,10 @@ hermes cron edit <job-id> --add-skill mi-health
 ## 使用流程
 
 1. 配置 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 后调用 `health_login_refresh`；`XIAOMI_DEVICE_ID` 为可选 Secret，用于在需要时指定取得该 `passToken` 的浏览器会话。Worker 会换取并缓存 `miothealth` session；失败时不会删除当前缓存会话。
-2. 使用 `health_me` 确认当前账号；查询单项原始摘要时调用 `health_latest`、`health_sleep`、`health_heart` 或 `health_steps`，需要趋势分析时优先调用 `health_analyze` 并传入用户当前 IANA 时区。
+2. 使用 `health_me` 确认当前账号；查询单项原始摘要时调用 `health_latest`、`health_sleep`、`health_heart`、`health_steps` 或 `health_workouts`，需要趋势分析时优先调用 `health_analyze` 并传入用户当前 IANA 时区。
 3. 查询亲友时先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
+
+对于“为什么负荷增加”等原因问题，先完成 `health_analyze`，再只读查询相同日期范围内的日志和日历（若可用）。日志用于核对实际发生的活动，日历用于识别计划安排；二者与健康数据不一致时应明确说明，不能静默合并。
 
 `health_login_start` 和 `health_login_poll` 仅为兼容保留。该二维码流程在部分账号会被 Xiaomi 拒绝并返回 `70036`，小米运动健康 App 也可能提示二维码不受支持；本项目不把它描述为已验证可用的登录方式。
 
@@ -90,10 +92,11 @@ hermes cron edit <job-id> --add-skill mi-health
 - `health_login_refresh`：使用小米账号 Secret 强制刷新 session，失败时保留现有缓存会话。
 - `health_relatives`：列出可查询亲友的 `relative_uid` 和备注。
 - `health_latest`：查询最新的睡眠、心率和步数摘要。
-- `health_analyze`：默认查询 30 天，以最近 7 个完整日和此前记录建立个人基线；分离未结束的当日活动，报告缺失日期、同步延迟、睡眠阶段完整性和心率采样质量，输出非诊断性的 robust statistics。
+- `health_analyze`：默认查询 30 天，以最近 7 个完整日和此前记录建立个人基线；分析步数、距离、calories、睡眠和每日心率，分离未结束的当日活动，报告缺失日期、同步延迟、睡眠阶段完整性和心率采样质量，输出非诊断性的 robust statistics。
 - `health_sleep`：查询最近 1 至 30 天的每日睡眠摘要，每天最多一条。
 - `health_heart`：查询最近 1 至 30 天的每日心率统计，不返回全部采样点。
 - `health_steps`：查询最近 1 至 30 天的每日步数摘要，每天最多一条。
+- `health_workouts`：查询本人最近 1 至 30 天的运动 session 记录（单次运动摘要），仅透传上游提供的字段；暂不支持亲友。
 
 查询本人时省略 `target` 或显式传入 `{"target":"self"}`。查询亲友时必须传入：
 
@@ -116,7 +119,13 @@ hermes cron edit <job-id> --add-skill mi-health
 }
 ```
 
-`health_analyze` 不重算健康 API 已返回的日期；`timezone` 只用于识别当前自然日，把当日步数和每日心率标为 `partial` 并排除在完整日基线之外。睡眠按起床日期视为已完成记录。同一日期存在重复摘要时，分析器会先按有效测量、采样或睡眠阶段完整性、记录时间和稳定键确定性地选择一条。`recent_days` 表示最近的自然日窗口；缺失或因质量不足被排除的日期不会由更早记录补位。结果先返回 `data_quality`：`missing_dates` 表示当天记录缺失，`missing_measurements` 表示记录存在但目标数值为空、非数值或负数；两者均按未知处理而不是按 0 处理。结果还会报告最新数据同步延迟、睡眠阶段完整率和心率采样质量。低于完整日采样数中位数 50% 的日期列入 `low_sample_dates`，缺少有效采样数的日期列入 `unknown_sample_dates`；两者都不进入心率趋势。趋势比较使用未舍入的 median、MAD、IQR 和 robust z-score，输出时才舍入；样本不足时返回 `insufficient_data`，不会硬给趋势结论。所有比较均为个人历史摘要，不能用于疾病诊断或用药建议。
+`health_analyze` 不重算健康 API 已返回的日期；`timezone` 只用于识别当前自然日，把当日步数、距离、calories 和每日心率标为 `partial` 并排除在完整日基线之外。睡眠按起床日期视为已完成记录。同一日期存在重复摘要时，分析器会先按有效测量、采样或睡眠阶段完整性、记录时间和稳定键确定性地选择一条。`recent_days` 表示最近的自然日窗口；缺失或因质量不足被排除的日期不会由更早记录补位。距离和 calories 与步数使用同一套个人基线方法（recent、baseline、comparison、mean、median、min、max、q1、q3、mad），对本人和亲友数据一致。结果先返回 `data_quality`：`missing_dates` 表示当天记录缺失，`missing_measurements` 表示记录存在但目标数值为空、非数值或负数（现覆盖 steps、sleep_duration、heart_rate、distance、calories）；两者均按未知处理而不是按 0 处理。结果还会报告最新数据同步延迟、睡眠阶段完整率和心率采样质量。低于完整日采样数中位数 50% 的日期列入 `low_sample_dates`，缺少有效采样数的日期列入 `unknown_sample_dates`；两者都不进入心率趋势。趋势比较使用未舍入的 median、MAD、IQR 和 robust z-score，输出时才舍入；样本不足时返回 `insufficient_data`，不会硬给趋势结论。所有比较均为个人历史摘要，不能用于疾病诊断或用药建议。
+
+每条睡眠记录带有 `sleep_stage_status`：`available` 表示至少一个 deep/light/REM 阶段时长大于 0；`unavailable` 表示总睡眠时长有效但阶段字段全为 0 或缺失；`unknown` 表示没有有效的总睡眠时长，无法判断阶段明细是否可用。总睡眠时长有效但阶段字段全为 0 时，表示睡眠阶段明细不可用，不表示深睡或浅睡实际为零。阶段字段为 0 不能推断记录来自手机或手环；小米上游未提供记录来源字段，来源一律视为 unknown。
+
+### 运动 session 记录（health_workouts）
+
+`health_workouts` 使用 `POST /app/v1/data/get_sport_records_by_time`（依据公开实现 shkyyy18/mi_fitness_data_bridge 与 binglua/mi-fitness-mcp-cn 确认的接口：同域名、同加密请求机制，响应为 `sport_records` 加 `has_more`/`next_key` 分页）。返回按时间排序的单次运动摘要：日期、时间戳、开始/结束时间、时长（`duration_seconds`，上游按秒处理）、`distance`、`calories`、平均/最高心率（来自上游 `avg_hrm`/`max_hrm`）和 `sport_type`（来自上游 `category`/`key`/`sport_type`）。上游缺失的字段直接省略，不填造数据；不返回原始高频传感器流；不把步数日汇总伪装成运动 session；`calories` 只是 Xiaomi 返回的 calories，不解释为 active calories、resting calories 或总能量消耗。`distance` 和 `calories` 按上游返回值透传，不做单位换算。亲友运动查询目前没有已验证的接口，暂不支持；该 endpoint 尚未在本项目的真实账号上验证过，字段含义以公开实现为依据。
 
 ## 使用边界
 

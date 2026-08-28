@@ -283,6 +283,8 @@ export function analyzeHealthSeries(series, options) {
   const currentSteps = steps.find((record) => record.date === currentDate);
   const currentHeartRate = heartRate.find((record) => record.date === currentDate);
   const currentStepsValue = finiteMeasurement(currentSteps?.steps);
+  const currentDistanceValue = finiteMeasurement(currentSteps?.distance);
+  const currentCaloriesValue = finiteMeasurement(currentSteps?.calories);
   const currentHeartRateValue = finiteMeasurement(currentHeartRate?.avg_hr);
   const currentHeartSampleCount = finiteMeasurement(currentHeartRate?.sample_count);
   const completedSteps = steps.filter((record) => record.date !== currentDate);
@@ -298,6 +300,12 @@ export function analyzeHealthSeries(series, options) {
     current_day: {
       steps: currentStepsValue !== null
         ? { date: currentSteps.date, steps: currentStepsValue, status: "partial" }
+        : null,
+      distance: currentDistanceValue !== null
+        ? { date: currentSteps.date, distance: currentDistanceValue, status: "partial" }
+        : null,
+      calories: currentCaloriesValue !== null
+        ? { date: currentSteps.date, calories: currentCaloriesValue, status: "partial" }
         : null,
       heart_rate: currentHeartRateValue !== null
         ? {
@@ -321,6 +329,8 @@ export function analyzeHealthSeries(series, options) {
         steps: missingMeasurementDates(steps, "steps"),
         sleep_duration: missingMeasurementDates(sleep, "total_duration"),
         heart_rate: missingMeasurementDates(heartRate, "avg_hr"),
+        distance: missingMeasurementDates(steps, "distance"),
+        calories: missingMeasurementDates(steps, "calories"),
       },
       sleep_stages: sleepStageQuality(sleep),
       heart_rate: heartQuality.quality,
@@ -333,6 +343,18 @@ export function analyzeHealthSeries(series, options) {
       steps: analyzeMetric(
         completedSteps,
         "steps",
+        recentActivityDates,
+        baselineActivityDates,
+      ),
+      distance: analyzeMetric(
+        completedSteps,
+        "distance",
+        recentActivityDates,
+        baselineActivityDates,
+      ),
+      calories: analyzeMetric(
+        completedSteps,
+        "calories",
         recentActivityDates,
         baselineActivityDates,
       ),

@@ -276,6 +276,8 @@ test("analysis reports dates whose records lack usable measurements", () => {
     steps: ["2026-08-01"],
     sleep_duration: ["2026-08-02"],
     heart_rate: ["2026-08-03"],
+    distance: ["2026-08-01"],
+    calories: ["2026-08-01"],
   });
 });
 
@@ -297,10 +299,16 @@ test("analysis treats negative wearable measurements as invalid", () => {
     steps: ["2026-08-01"],
     sleep_duration: ["2026-08-02"],
     heart_rate: ["2026-08-03"],
+    distance: ["2026-08-01"],
+    calories: ["2026-08-01"],
   });
   assert.equal(result.metrics.steps.recent.n, 0);
   assert.equal(result.metrics.sleep_duration.recent.n, 0);
   assert.equal(result.metrics.heart_rate.recent.n, 0);
+  assert.equal(result.metrics.distance.recent.n, 0);
+  assert.equal(result.metrics.calories.recent.n, 0);
+  assert.equal(result.metrics.distance.comparison.status, "insufficient_data");
+  assert.equal(result.metrics.calories.comparison.status, "insufficient_data");
   assert.equal(result.data_quality.heart_rate.accepted_n, 0);
   assert.equal(result.data_quality.sleep_stages.available_n, 1);
   assert.equal(result.data_quality.sleep_stages.unavailable_n, 0);
@@ -374,6 +382,83 @@ test("current-day activity never changes completed-day statistics", () => {
       assert.equal(result.metrics.steps.recent.median, 3100);
     }),
   );
+});
+
+test("analysis analyzes distance and calories with the steps baseline method", () => {
+  const steps = [
+    daily("2026-08-01", { steps: 1000, distance: 700, calories: 40 }),
+    daily("2026-08-02", { steps: 1100, distance: 770, calories: 44 }),
+    daily("2026-08-03", { steps: 900, distance: 630, calories: 36 }),
+    daily("2026-08-04", { steps: 1000, distance: 700, calories: 40 }),
+    daily("2026-08-05", { steps: 3000, distance: 2100, calories: 120 }),
+    daily("2026-08-06", { steps: 3200, distance: 2240, calories: 128 }),
+    daily("2026-08-07", { steps: 3100, distance: 2170, calories: 124 }),
+    daily("2026-08-08", { steps: 50, distance: 35, calories: 2 }),
+  ];
+
+  const result = analyzeHealthSeries(
+    { steps, sleep: [], heart_rate: [] },
+    { currentDate: "2026-08-08", days: 8, recentDays: 3 },
+  );
+
+  assert.deepEqual(result.current_day.distance, {
+    date: "2026-08-08",
+    distance: 35,
+    status: "partial",
+  });
+  assert.deepEqual(result.current_day.calories, {
+    date: "2026-08-08",
+    calories: 2,
+    status: "partial",
+  });
+
+  for (const [metric, { recentMedian, baselineMedian, baselineMad }] of [
+    ["distance", { recentMedian: 2170, baselineMedian: 700, baselineMad: 35 }],
+    ["calories", { recentMedian: 124, baselineMedian: 40, baselineMad: 2 }],
+  ]) {
+    const summary = result.metrics[metric];
+    assert.equal(summary.recent.n, 3, metric);
+    assert.equal(summary.recent.median, recentMedian, metric);
+    assert.equal(summary.baseline.n, 4, metric);
+    assert.equal(summary.baseline.median, baselineMedian, metric);
+    assert.equal(summary.baseline.mad, baselineMad, metric);
+    assert.equal(summary.baseline.max, metric === "distance" ? 770 : 44, metric);
+    assert.equal(summary.comparison.status, "above_baseline", metric);
+    assert.equal(summary.comparison.non_diagnostic, true, metric);
+  }
+});
+
+test("analysis keeps missing, negative, and invalid distance and calories unknown", () => {
+  const steps = [
+    daily("2026-08-01", { steps: 1000, distance: 700, calories: 40 }),
+    daily("2026-08-05", { steps: 1000, distance: null, calories: -5 }),
+    daily("2026-08-06", { steps: 1000, distance: "abc", calories: "" }),
+    daily("2026-08-07", { steps: 1000, distance: 700, calories: 40 }),
+  ];
+
+  const result = analyzeHealthSeries(
+    { steps, sleep: [], heart_rate: [] },
+    { currentDate: "2026-08-08", days: 8, recentDays: 3 },
+  );
+
+  assert.deepEqual(result.data_quality.missing_measurements.distance, [
+    "2026-08-05",
+    "2026-08-06",
+  ]);
+  assert.deepEqual(result.data_quality.missing_measurements.calories, [
+    "2026-08-05",
+    "2026-08-06",
+  ]);
+  assert.equal(result.metrics.distance.recent.n, 1);
+  assert.equal(result.metrics.calories.recent.n, 1);
+  assert.equal(result.metrics.distance.recent.median, 700);
+  assert.equal(result.metrics.distance.recent.min, 700);
+  assert.equal(result.metrics.calories.recent.median, 40);
+  assert.equal(result.metrics.calories.recent.min, 40);
+  assert.equal(result.metrics.distance.baseline.n, 1);
+  assert.equal(result.metrics.distance.baseline.median, 700);
+  assert.equal(result.current_day.distance, null);
+  assert.equal(result.current_day.calories, null);
 });
 
 test("analysis validates date and window options before allocating dates", () => {
