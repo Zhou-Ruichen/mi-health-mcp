@@ -55,7 +55,7 @@ mcp_servers:
 
 ### Hermes skill
 
-仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.4.0）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
+仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.5.0）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
 
 ```bash
 hermes skills install https://raw.githubusercontent.com/<your-github-account>/mi-health-mcp/main/skills/mi-health/SKILL.md
@@ -122,7 +122,7 @@ hermes cron edit <job-id> --add-skill mi-health
 
 `health_analyze` 不重算健康 API 已返回的日期；`timezone` 只用于识别当前自然日，把当日步数、距离、calories 和每日心率标为 `partial` 并排除在完整日基线之外。睡眠按起床日期视为已完成记录。同一日期存在重复摘要时，分析器会先按有效测量、采样或睡眠阶段完整性、记录时间和稳定键确定性地选择一条。`recent_days` 表示最近的自然日窗口；缺失或因质量不足被排除的日期不会由更早记录补位。距离和 calories 与步数使用同一套个人基线方法（recent、baseline、comparison、mean、median、min、max、q1、q3、mad），对本人和亲友数据一致。结果先返回 `data_quality`：`missing_dates` 表示当天记录缺失，`missing_measurements` 表示记录存在但目标数值为空、非数值或负数（现覆盖 steps、sleep_duration、heart_rate、distance、calories）；两者均按未知处理而不是按 0 处理。结果还会报告最新数据同步延迟、睡眠阶段完整率和心率采样质量。低于完整日采样数中位数 50% 的日期列入 `low_sample_dates`，缺少有效采样数的日期列入 `unknown_sample_dates`；两者都不进入心率趋势。趋势比较使用未舍入的 median、MAD、IQR 和 robust z-score，输出时才舍入；样本不足时返回 `insufficient_data`，不会硬给趋势结论。所有比较均为个人历史摘要，不能用于疾病诊断或用药建议。
 
-每条睡眠记录带有 `sleep_stage_status`：`available` 表示至少一个 deep/light/REM 阶段时长大于 0；`unavailable` 表示总睡眠时长有效但阶段字段全为 0 或缺失；`unknown` 表示没有有效的总睡眠时长，无法判断阶段明细是否可用。总睡眠时长有效但阶段字段全为 0 时，表示睡眠阶段明细不可用，不表示深睡或浅睡实际为零。阶段字段为 0 不能推断记录来自手机或手环；小米上游未提供记录来源字段，来源一律视为 unknown。
+每条睡眠记录带有 `sleep_stage_status`：`available` 表示至少一个 deep/light/REM 阶段时长大于 0；`unavailable` 表示总睡眠时长有效但阶段字段全为 0 或缺失；`unknown` 表示没有有效的总睡眠时长，无法判断阶段明细是否可用。总睡眠时长有效但阶段字段全为 0 时，表示睡眠阶段明细不可用，不表示深睡或浅睡实际为零。每条睡眠记录还带有 `recording_source: {kind: "unknown", basis: "not_reported"}`：2026 年 8 月对 25 条原始 sleep 记录（13 个 wake 日期，含手机与手环记录日）的核实显示，item 层只有 `sid/key/time/value/zone_offset/zone_name/update_time`，value 层没有任何 source/device_type 类字段；`device_bedtime` 等带 device 前缀的字段在手机与手环记录日都存在，不能作为来源标记。因此来源一律为 unknown，不因字段缺失、心率字段有无或阶段完整性推断记录设备。
 
 ### 运动 session 记录（health_workouts）
 

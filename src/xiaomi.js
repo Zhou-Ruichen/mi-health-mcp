@@ -752,6 +752,7 @@ function compactSleep(record) {
   ].some((seconds) => seconds > 0)
     ? "available"
     : duration > 0 ? "unavailable" : "unknown";
+  output.recording_source = { kind: "unknown", basis: "not_reported" };
   const score = finiteNumber(value.sleep_score) ?? finiteNumber(value.score);
   if (score !== null) output.sleep_score = score;
   const bedtime = finiteNumber(value.bedtime) ||

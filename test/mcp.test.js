@@ -613,6 +613,9 @@ test("health_sleep reports sleep_stage_status and keeps raw stage fields", async
   assert.equal(zeroStages.sleep_light_duration, 0);
   assert.equal(noDuration.sleep_stage_status, "unknown");
   assert.equal("total_duration" in noDuration, false);
+  for (const record of value.data) {
+    assert.deepEqual(record.recording_source, { kind: "unknown", basis: "not_reported" });
+  }
   assert.doesNotMatch(text, /passToken|serviceToken|ssecurity/);
 });
 

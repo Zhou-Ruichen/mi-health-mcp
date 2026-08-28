@@ -1,7 +1,7 @@
 ---
 name: mi-health
 description: Use when querying or analyzing Xiaomi Mi Fitness data through MCP.
-version: 1.4.0
+version: 1.5.0
 license: GPL-3.0
 metadata:
   hermes:
@@ -208,7 +208,11 @@ When the user asks only for a value or table:
   `sleep_stage_status` tells whether stage detail is `available`,
   `unavailable` (total duration valid, stage breakdown absent or all zero), or
   `unknown` (no valid total duration). Zero stage fields never mean zero deep
-  or light sleep.
+  or light sleep. Each record's `recording_source` is always
+  `{kind: "unknown", basis: "not_reported"}`: the upstream payload carries no
+  source field (verified against raw records from both phone-recorded and
+  wearable-recorded dates), so never claim a night came from the phone or the
+  band, not even from missing heart-rate fields or stage completeness.
 - `health_workouts` returns one entry per recorded workout session, only with
   fields the upstream provided; absent fields are omitted, never invented.
   Distance and calories are raw Xiaomi values with no unit conversion, and
