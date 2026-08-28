@@ -236,6 +236,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_heart",
       "health_steps",
       "health_workouts",
+      "health_workout_analyze",
       "health_auth_status",
       "health_me",
       "health_relatives",
@@ -698,6 +699,137 @@ test("health_workouts returns whitelisted workout sessions for self only", async
   });
   assert.equal(relative.json.result.isError, true);
   assert.match(relative.json.result.content[0].text, /不支持参数/);
+});
+
+test("health_workout_analyze validates arguments and stays self-only", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const env = envWithKv();
+  const cases = [
+    [{ target: "relative", relative_uid: 42 }, /不支持参数/],
+    [{ recent_days: 2 }, /recent_days|3 到 14/i],
+    [{ days: 31 }, /days|8 到 30/i],
+    [{ days: 8, recent_days: 8 }, /recent_days.*小于.*days|必须小于/i],
+    [{ timezone: "Mars/Olympus" }, /IANA 时区/i],
+  ];
+
+  for (const [args, expected] of cases) {
+    const result = await callMcp(worker, env, {
+      jsonrpc: "2.0",
+      id: `workout-analyze-${JSON.stringify(args)}`,
+      method: "tools/call",
+      params: { name: "health_workout_analyze", arguments: args },
+    });
+    assert.equal(result.json.result.isError, true, JSON.stringify(args));
+    assert.match(result.json.result.content[0].text, expected, JSON.stringify(args));
+  }
+});
+
+test("health_workout_analyze summarizes sessions with a single bounded query", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const now = new Date();
+  const daysAgo = (offset) =>
+    new Date(now.getTime() - offset * 86400 * 1000).toISOString().slice(0, 10);
+  const sessions = [
+    { offset: 0, duration: 1800, type: "outdoor_run" },
+    { offset: 4, duration: 3600, type: "swim" },
+    { offset: 4, duration: 900, type: "outdoor_run" },
+    { offset: 10, duration: 3600, type: "outdoor_run" },
+    { offset: 11, duration: 3600, type: "hike" },
+    { offset: 20, duration: 5400, type: "outdoor_run" },
+  ].map(({ offset, duration, type }) => ({
+    date: daysAgo(offset),
+    start_time: Date.parse(`${daysAgo(offset)}T06:00:00Z`) / 1000,
+    duration_seconds: duration,
+    sport_type: type,
+  }));
+  let sportCalls = 0;
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_sport_records_by_time": (url, options, params) => {
+      sportCalls += 1;
+      assert.equal("key" in params, false);
+      return {
+        code: 0,
+        result: {
+          sport_records: sessions.map((item, index) => ({
+            time: item.start_time,
+            zone_offset: 0,
+            category: item.sport_type,
+            value: JSON.stringify({
+              start_time: item.start_time,
+              duration: item.duration_seconds,
+            }),
+          })),
+          has_more: false,
+        },
+      };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "workout-analyze",
+    method: "tools/call",
+    params: {
+      name: "health_workout_analyze",
+      arguments: { days: 28, recent_days: 7, timezone: "UTC" },
+    },
+  });
+  const text = result.json.result.content[0].text;
+  const value = JSON.parse(text);
+
+  assert.equal(sportCalls, 1);
+  assert.equal(value.target, "self");
+  assert.equal(value.user_id, "account-user");
+  assert.equal(value.period.current_date, now.toISOString().slice(0, 10));
+  assert.equal(value.period.days, 28);
+  assert.equal(value.period.recent_days, 7);
+  assert.equal(value.data_quality.session_count, 6);
+  assert.equal(value.data_quality.sessions_with_duration, 6);
+  assert.equal(value.data_quality.sessions_with_distance, 0);
+  assert.equal(value.recent.session_count, 3);
+  assert.equal(value.recent.active_days, 2);
+  assert.equal(value.recent.total_duration_seconds, 1800 + 3600 + 900);
+  assert.deepEqual(
+    value.recent.sport_types.map(({ sport_type, session_count }) => ({ sport_type, session_count })),
+    [
+      { sport_type: "outdoor_run", session_count: 2 },
+      { sport_type: "swim", session_count: 1 },
+    ],
+  );
+  assert.equal(value.recent.days_since_last_workout, 0);
+  assert.equal(value.baseline.complete_windows, 3);
+  assert.equal(value.comparison.non_diagnostic, true);
+  assert.doesNotMatch(text, /service-token-secret|passToken|ssecurity/);
+});
+
+test("health_workout_analyze reports an empty history without fabricating totals", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_sport_records_by_time": {
+      code: 0,
+      result: { sport_records: [], has_more: false },
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "workout-analyze-empty",
+    method: "tools/call",
+    params: { name: "health_workout_analyze", arguments: {} },
+  });
+  const text = result.json.result.content[0].text;
+  const value = JSON.parse(text);
+
+  assert.equal(value.data_quality.session_count, 0);
+  assert.equal(value.recent.session_count, 0);
+  assert.equal(value.recent.total_distance, null);
+  assert.equal(value.recent.total_calories, null);
+  assert.equal(value.recent.days_since_last_workout, null);
+  assert.deepEqual(value.data_quality.sync, {
+    latest_workout_time: null,
+    lag_hours: null,
+  });
+  assert.equal(value.comparison.session_count, "within_baseline");
 });
 
 test("health_workouts paginates with next_key and reports empty windows", async () => {

@@ -1,4 +1,5 @@
 import { analyzeHealthSeries } from "./analysis.js";
+import { analyzeWorkoutSessions } from "./workoutAnalysis.js";
 import {
   getAuthStatus,
   getHealthMe,
@@ -89,6 +90,14 @@ const selfDaysSchema = {
   additionalProperties: false,
 };
 
+const timezoneProperty = {
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  default: "UTC",
+  description: "用于识别当日未结束记录的 IANA 时区，例如 Europe/Berlin；不重算接口返回的日期。",
+};
+
 const analysisSchema = {
   type: "object",
   properties: {
@@ -107,15 +116,31 @@ const analysisSchema = {
       default: 7,
       description: "近期完整日窗口，默认 7；必须小于 days。",
     },
-    timezone: {
-      type: "string",
-      minLength: 1,
-      maxLength: 64,
-      default: "UTC",
-      description: "用于识别当日未结束记录的 IANA 时区，例如 Europe/Berlin；不重算接口返回的日期。",
-    },
+    timezone: timezoneProperty,
   },
   allOf: targetSchema.allOf,
+  additionalProperties: false,
+};
+
+const workoutAnalysisSchema = {
+  type: "object",
+  properties: {
+    days: {
+      type: "integer",
+      minimum: 8,
+      maximum: 30,
+      default: 28,
+      description: "分析窗口天数，默认 28，范围 8 到 30。",
+    },
+    recent_days: {
+      type: "integer",
+      minimum: 3,
+      maximum: 14,
+      default: 7,
+      description: "近期窗口宽度（天），默认 7；必须小于 days。",
+    },
+    timezone: timezoneProperty,
+  },
   additionalProperties: false,
 };
 
@@ -149,6 +174,11 @@ export const TOOLS = [
     name: "health_workouts",
     description: "查询本人最近的运动 session 记录（单次运动摘要：类型、开始/结束时间、时长秒数、距离、calories、平均/最高心率，仅透传上游提供的字段）。仅支持本人，暂不支持亲友；不返回原始高频传感器数据。calories 为 Xiaomi 返回值，不解释为 active calories。",
     inputSchema: selfDaysSchema,
+  },
+  {
+    name: "health_workout_analyze",
+    description: "基于个人历史分析本人运动 session：最近窗口的次数、活跃天数、总时长和运动类型，以及与此前同宽日历窗口的比较。默认 28 天、最近 7 天窗口。结果仅供非诊断性参考，不构成训练建议。仅支持本人。",
+    inputSchema: workoutAnalysisSchema,
   },
   {
     name: "health_auth_status",
@@ -249,6 +279,7 @@ function validateToolArguments(name, args) {
     parseDays(args);
   }
   if (name === "health_analyze") parseAnalysisArgs(args);
+  if (name === "health_workout_analyze") parseAnalysisArgs(args, 28);
 }
 
 function parseDays(args) {
@@ -277,8 +308,8 @@ function currentDateInTimezone(timezone, now = Date.now()) {
   return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
-function parseAnalysisArgs(args) {
-  const days = args.days === undefined ? 30 : args.days;
+function parseAnalysisArgs(args, defaultDays = 30) {
+  const days = args.days === undefined ? defaultDays : args.days;
   const recentDays = args.recent_days === undefined ? 7 : args.recent_days;
   const timezone = args.timezone === undefined ? "UTC" : args.timezone;
   if (!Number.isInteger(days) || days < 8 || days > 30) {
@@ -359,6 +390,35 @@ async function getHealthAnalysis(env, args, fetchImpl) {
   };
 }
 
+async function getWorkoutAnalysis(env, args, fetchImpl) {
+  const { days, recentDays, timezone } = parseAnalysisArgs(args, 28);
+  const now = Date.now();
+  const workouts = await getWorkouts(env, days, fetchImpl, now);
+  const currentDate = currentDateInTimezone(timezone, now);
+  return {
+    target: "self",
+    user_id: workouts.user_id,
+    period: {
+      current_date: currentDate,
+      days,
+      recent_days: recentDays,
+      timezone,
+    },
+    ...analyzeWorkoutSessions(workouts.data, {
+      currentDate,
+      days,
+      recentDays,
+      nowSeconds: Math.floor(now / 1000),
+    }),
+    caveats: [
+      "运动 session 是完整事件，当前自然日的 session 也计入最近窗口。",
+      "没有运动记录不等于没有运动：设备未同步时不会产生新记录，结合 sync.lag_hours 和 days_since_last_workout 解读。",
+      "同一天多条 session 全部计数，不自动合并；记录数不推断运动强度或训练负荷。",
+      "比较基于本人历史窗口中位数，仅供非诊断性趋势参考。",
+    ],
+  };
+}
+
 async function withAuthTracking(env, fetchImpl, operation) {
   try {
     return await operation();
@@ -407,6 +467,10 @@ export async function callTool(
     case "health_workouts":
       return withAuthTracking(env, fetchImpl, () =>
         getWorkouts(env, parseDays(args), fetchImpl),
+      );
+    case "health_workout_analyze":
+      return withAuthTracking(env, fetchImpl, () =>
+        getWorkoutAnalysis(env, args, fetchImpl),
       );
     case "health_auth_status":
       return getAuthStatus(env);

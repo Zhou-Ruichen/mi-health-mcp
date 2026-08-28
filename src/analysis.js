@@ -151,7 +151,7 @@ function analyzeMetric(records, key, recentDates, baselineDates) {
   };
 }
 
-function isUtcCalendarDate(value) {
+export function isUtcCalendarDate(value) {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return false;
   }
@@ -160,7 +160,7 @@ function isUtcCalendarDate(value) {
     new Date(timestamp).toISOString().slice(0, 10) === value;
 }
 
-function validateOptions(options) {
+export function validateOptions(options) {
   const currentDate = options?.currentDate;
   const days = options?.days === undefined ? 30 : options.days;
   const recentDays = options?.recentDays === undefined ? 7 : options.recentDays;

@@ -55,7 +55,7 @@ mcp_servers:
 
 ### Hermes skill
 
-仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.3.0）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
+仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.4.0）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
 
 ```bash
 hermes skills install https://raw.githubusercontent.com/<your-github-account>/mi-health-mcp/main/skills/mi-health/SKILL.md
@@ -97,6 +97,7 @@ hermes cron edit <job-id> --add-skill mi-health
 - `health_heart`：查询最近 1 至 30 天的每日心率统计，不返回全部采样点。
 - `health_steps`：查询最近 1 至 30 天的每日步数摘要，每天最多一条。
 - `health_workouts`：查询本人最近 1 至 30 天的运动 session 记录（单次运动摘要），仅透传上游提供的字段；暂不支持亲友。
+- `health_workout_analyze`：默认 28 天、最近 7 天窗口，分析本人运动 session 的次数、活跃天数、总时长和运动类型，并与此前同宽日历窗口比较；输出非诊断性参考，不构成训练建议。
 
 查询本人时省略 `target` 或显式传入 `{"target":"self"}`。查询亲友时必须传入：
 
@@ -126,6 +127,10 @@ hermes cron edit <job-id> --add-skill mi-health
 ### 运动 session 记录（health_workouts）
 
 `health_workouts` 使用 `POST /app/v1/data/get_sport_records_by_time`（依据公开实现 shkyyy18/mi_fitness_data_bridge 与 binglua/mi-fitness-mcp-cn 确认的接口：同域名、同加密请求机制，响应为 `sport_records` 加 `has_more`/`next_key` 分页）。返回按时间排序的单次运动摘要：日期、时间戳、开始/结束时间、时长（`duration_seconds`，上游按秒处理）、`distance`、`calories`、平均/最高心率（来自上游 `avg_hrm`/`max_hrm`）和 `sport_type`（来自上游 `category`/`key`/`sport_type`）。上游缺失的字段直接省略，不填造数据；不返回原始高频传感器流；不把步数日汇总伪装成运动 session；`calories` 只是 Xiaomi 返回的 calories，不解释为 active calories、resting calories 或总能量消耗。`distance` 和 `calories` 按上游返回值透传，不做单位换算。亲友运动查询目前没有已验证的接口，暂不支持；该 endpoint 尚未在本项目的真实账号上验证过，字段含义以公开实现为依据。
+
+### 运动 session 分析（health_workout_analyze）
+
+`health_workout_analyze` 只做一次有界的运动记录查询，把 `days` 天窗口按自然日划分：最近的 `recent_days` 天是 recent 窗口，此前完整、互不重叠的同宽窗口是 baseline（默认 28/7 得到 3 个基线窗口）；完整窗口不足 2 个时比较返回 `insufficient_data`。运动 session 是完整事件，当前自然日的 session 也计入 recent 窗口。同一天多条 session 全部计数（`same_day_multiple_sessions` 提示），不自动合并；缺失或非法字段不计入总量也不转 0，字段覆盖数在 `data_quality` 中报告；`total_distance`/`total_calories` 在无有效值时为 null 而不是 0。`days_since_last_workout` 是距最新已同步 session 的自然日差，与 `sync.lag_hours` 分开报告：设备未同步时不会产生新记录，不能把“没有新记录”说成“没有运动”。比较只看本人历史窗口中位数（ratio 阈值 1.25/0.75），不使用通用运动阈值；不根据心率推断运动强度，不输出训练负荷、恢复评分或运动处方。
 
 ## 使用边界
 

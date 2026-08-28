@@ -1,7 +1,7 @@
 ---
 name: mi-health
 description: Use when querying or analyzing Xiaomi Mi Fitness data through MCP.
-version: 1.3.0
+version: 1.4.0
 license: GPL-3.0
 metadata:
   hermes:
@@ -43,6 +43,10 @@ alert.
 
 ## Choose The Tool
 
+- `health_workout_analyze`: preferred for “这周运动了没有”, “运动了多少次”,
+  “主要做了什么运动”, or “和前几周比运动量如何”. It performs one bounded
+  workout query (default 28 days, recent window 7 days) and requires no
+  separate `health_workouts` call for the same window.
 - `health_analyze`: preferred for “分析”, “趋势”, “最近怎么样”, “和平时相比”,
   weekly reviews, or any request requiring interpretation rather than a raw
   value. It computes deterministic personal-baseline statistics.
@@ -53,6 +57,11 @@ alert.
   rate when the upstream provides them. Not raw sensor streams, not daily step
   totals. Relative workout queries have no verified endpoint and are not
   supported.
+- `health_workout_analyze`: personal workout-session analysis for the self
+  account only. Reports the recent window's session count, active days,
+  duration, and sport types, compares them with earlier equal-length calendar
+  windows, and flags sync lag and same-day duplicates. Non-diagnostic; not
+  training advice.
 - `health_sleep`: one selected sleep summary per wake date for 1 to 30 days.
 - `health_heart`: daily heart-rate statistics for 1 to 30 days; not raw PPG,
   ECG, RR intervals, or a complete sample stream.
@@ -164,6 +173,24 @@ For a trend or interpretation request:
 If `comparison.status` is `insufficient_data`, do not improvise a trend. Report
 that more completed days are needed. A single high or low day should be
 reported as an observation, not treated as a sustained condition.
+
+When interpreting `health_workout_analyze`:
+
+- A workout session is a complete event; sessions on the current calendar day
+  count toward the recent window, and `days_since_last_workout` can be 0.
+- `days_since_last_workout` and `sync.lag_hours` are separate checks. When the
+  lag is large, absence of new records means the device has not synced, not
+  that the user did not work out; say which one the data supports.
+- Sessions on the same day are all counted and also listed under
+  `same_day_multiple_sessions`; do not assert the device split one activity,
+  and do not merge them.
+- Missing or invalid duration/distance/calories stay out of the totals, and
+  the coverage counts in `data_quality` show how many sessions carry each
+  field. Zero totals from missing fields must not be reported as measured
+  zeros.
+- Do not infer workout intensity, training load, recovery, or hydration from
+  session counts, durations, or heart-rate fields, and do not convert between
+  step counts and workout durations.
 
 ## Explain Raw Results
 
