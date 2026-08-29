@@ -1,7 +1,7 @@
 ---
 name: mi-health
 description: Use when querying or analyzing Xiaomi Mi Fitness data through MCP.
-version: 1.5.0
+version: 1.5.1
 license: GPL-3.0
 metadata:
   hermes:
@@ -67,13 +67,16 @@ alert.
   ECG, RR intervals, or a complete sample stream.
 - `health_me`: current Xiaomi account login state and non-secret identity.
 - `health_relatives`: authorized relatives available for queries.
+- `health_auth_status`: whether the configured Xiaomi credentials exist, plus
+  user ID, status, and last-update time; never returns credential material.
 - `health_login_status`: current session state and login method.
 - `health_login_refresh`: explicitly refresh the session from configured
   account secrets without returning credentials.
 
 Use `days: 1` for a requested current value or last night, `days: 7` for a raw
 recent series, and `health_analyze` with `days: 30`, `recent_days: 7` for an
-unspecified trend. The supported analysis range is 8 to 30 days.
+unspecified trend. The supported analysis range is 8 to 30 days; `recent_days`
+is 3 to 14 and must be smaller than `days`.
 
 ## Analysis Procedure
 
@@ -112,11 +115,14 @@ For a trend or interpretation request:
      sleep duration is valid but every stage field is 0 or missing; `unknown`
      when total duration itself is invalid. When total sleep duration is valid
      but all stage fields are 0, the stage detail is unavailable; it does not
-     mean deep or light sleep was actually zero, and it does not identify the
-     recording device (the upstream provides no source field, so the source is
-     unknown). `sleep_stages.unavailable_dates` lists the dates in the
-     `unavailable` state; say the stage detail is unavailable; never say the
-     user had zero deep sleep.
+     mean deep or light sleep was actually zero. `sleep_stages.unavailable_dates`
+     lists the dates in the `unavailable` state; say the stage detail is
+     unavailable; never say the user had zero deep sleep or infer the recording
+     device from stage completeness or heart-rate fields. Do not mention the
+     recording source in routine summaries. Mention it only when the user asks,
+     or when the user has explicitly stated the source or band non-wear for that
+     exact wake date; identify that statement as user-provided context, not an
+     MCP result.
    - `heart_rate.low_sample_dates` are below half the completed-day sample-count
      median; `heart_rate.unknown_sample_dates` have no valid positive sample
      count. Both groups are excluded from heart-rate trend statistics, and
@@ -208,11 +214,11 @@ When the user asks only for a value or table:
   `sleep_stage_status` tells whether stage detail is `available`,
   `unavailable` (total duration valid, stage breakdown absent or all zero), or
   `unknown` (no valid total duration). Zero stage fields never mean zero deep
-  or light sleep. Each record's `recording_source` is always
-  `{kind: "unknown", basis: "not_reported"}`: the upstream payload carries no
-  source field (verified against raw records from both phone-recorded and
-  wearable-recorded dates), so never claim a night came from the phone or the
-  band, not even from missing heart-rate fields or stage completeness.
+  or light sleep. Do not mention the recording source in routine answers. If
+  the user asks, explain that the upstream payload does not identify the device.
+  A source or band non-wear stated by the user for that exact wake date may be
+  repeated as user-provided context; never infer it from missing heart-rate
+  fields or stage completeness.
 - `health_workouts` returns one entry per recorded workout session, only with
   fields the upstream provided; absent fields are omitted, never invented.
   Distance and calories are raw Xiaomi values with no unit conversion, and
@@ -222,7 +228,10 @@ When the user asks only for a value or table:
 ## Handle Login
 
 When a health query reports an authentication or session error, call
-`health_login_status`. A valid cached QR session can make this tool report
+`health_login_status`. `health_auth_status` reports whether the account
+secrets are configured at all, plus their user ID and last-update time; use
+it to tell missing credentials apart from a stale cached session. A valid
+cached QR session can make this tool report
 `logged_in` without testing newly configured account secrets. Call
 `health_login_refresh` only when the user explicitly asks to validate or
 replace that cached session. `XIAOMI_USER_ID` and `XIAOMI_PASS_TOKEN` are
