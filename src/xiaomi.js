@@ -1,6 +1,5 @@
 import {
   buildEncryptedParams,
-  bytesToBase64,
   decryptResponse,
 } from "./crypto.js";
 
@@ -293,13 +292,6 @@ function passTokenCredentials(env) {
   return { userId, passToken, deviceId };
 }
 
-async function clientSign(nonce, ssecurity) {
-  const source = new TextEncoder().encode(`nonce=${nonce || ""}&${ssecurity}`);
-  return bytesToBase64(
-    new Uint8Array(await globalThis.crypto.subtle.digest("SHA-1", source)),
-  );
-}
-
 export async function exchangePassTokenSession(
   env,
   fetchImpl = fetch,
@@ -399,7 +391,8 @@ export async function exchangePassTokenSession(
   }
 
   const location = assertXiaomiUrl(data.location);
-  location.searchParams.set("clientSign", await clientSign(data.nonce, data.ssecurity));
+  // location 自带小米的 _ssign 签名；追加 clientSign 会使 sts-hlth.io.mi.com
+  // 拒绝下发 serviceToken（2026-08 对真实账号实测），必须原样请求。
   const cookies = {
     userId: String(data.userId),
     passToken: credentials.passToken,

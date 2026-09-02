@@ -171,7 +171,8 @@ function passTokenSessionMock({
       );
     }
     if (url.hostname === "sts.api.io.mi.com" && url.pathname === "/login-complete") {
-      assert.ok(url.searchParams.get("clientSign"));
+      // location 自带 _ssign，追加 clientSign 会被上游拒绝（见 src/xiaomi.js 注释）
+      assert.equal(url.searchParams.get("clientSign"), null);
       return new Response(null, {
         status: 302,
         headers: { "Set-Cookie": "serviceToken=service-token-secret; Path=/; HttpOnly" },
