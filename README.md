@@ -57,7 +57,7 @@ mcp_servers:
 
 ### Hermes skill
 
-仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.5.1）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
+仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.5.2）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
 
 ```bash
 hermes skills install https://raw.githubusercontent.com/<your-github-account>/mi-health-mcp/main/skills/mi-health/SKILL.md

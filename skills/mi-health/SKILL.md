@@ -1,7 +1,7 @@
 ---
 name: mi-health
 description: Use when querying or analyzing Xiaomi Mi Fitness data through MCP.
-version: 1.5.1
+version: 1.5.2
 license: GPL-3.0
 metadata:
   hermes:
@@ -57,11 +57,6 @@ alert.
   rate when the upstream provides them. Not raw sensor streams, not daily step
   totals. Relative workout queries have no verified endpoint and are not
   supported.
-- `health_workout_analyze`: personal workout-session analysis for the self
-  account only. Reports the recent window's session count, active days,
-  duration, and sport types, compares them with earlier equal-length calendar
-  windows, and flags sync lag and same-day duplicates. Non-diagnostic; not
-  training advice.
 - `health_sleep`: one selected sleep summary per wake date for 1 to 30 days.
 - `health_heart`: daily heart-rate statistics for 1 to 30 days; not raw PPG,
   ECG, RR intervals, or a complete sample stream.
@@ -96,6 +91,14 @@ For a trend or interpretation request:
 
    The timezone identifies the unfinished current date only. Never recalculate
    the dates returned by Xiaomi in another timezone.
+
+   Determine the timezone from the user's stated or known location, never
+   from the Hermes host's system timezone or locale. The host may run on a
+   VPS or on a machine whose timezone differs from the user's, for example a
+   UTC+8 host serving a Europe/Berlin user. If the user's current location
+   is unknown or just changed because of travel, ask before calling
+   `health_analyze` or `health_workout_analyze`; do not silently fall back
+   to UTC or the host timezone.
 
 2. Read `period` and `data_quality` before interpreting `metrics`:
 
@@ -205,10 +208,19 @@ When the user asks only for a value or table:
 - Lead with the requested value and keep the answer compact.
 - Treat missing fields or dates as unknown, not zero. Mention possible device
   synchronization delay when recent data is absent.
+- Check `latest_data_time` before quoting `health_latest` values as current.
+  When the newest record is hours behind the query time, state the data
+  timestamp and the possible device synchronization delay instead of
+  presenting the numbers as live.
 - Steps are daily totals in the compact response. Do not sum totals across
   records again.
 - Heart results contain daily `sample_count`, `avg_hr`, `min_hr`, `max_hr`, and
   `latest_hr`; they are not a raw physiological signal.
+- Heart-rate averages come from two scopes: the sleep record's `avg_hr`
+  covers the sleep window, while `health_heart` and `health_latest` daily
+  statistics cover the whole day. Label them as 睡眠期间平均心率 versus
+  当日平均心率, never compare a sleep-window average with a daily-average
+  baseline, and never label a daily average as a night average.
 - Sleep returns at most one selected main record per wake date. Do not infer
   that naps or discarded duplicate records did not occur. Each record's
   `sleep_stage_status` tells whether stage detail is `available`,
@@ -275,6 +287,25 @@ delayed. Cron prompts must be self-contained and specify target, analysis
 window, current IANA timezone, delivery destination, and authentication-failure
 behavior. Never place credentials in a cron prompt or switch to QR login after
 a scheduled authentication failure.
+
+Give every scheduled summary a fixed compact shape instead of one dense
+paragraph:
+
+- One short line per metric: sleep first (duration plus at most one
+  personal-baseline comparison in parentheses), then heart rate with correct
+  scope labels, then steps with the synchronization timestamp.
+- Use only personal-baseline comparisons from the MCP result. Do not import
+  generic guidelines such as a recommended minimum sleep duration.
+- Do not append prescriptive advice such as bedtime plans unless the cron
+  prompt explicitly asks for suggestions.
+
+Example shape:
+
+```
+昨夜睡眠 6 小时 12 分（近 7 个完整日中位 7 小时 55 分）
+睡眠期间平均心率 53；当日平均 62，区间 46–102，最新 63
+今日步数 102（数据截至 10:46 同步）
+```
 
 ## Verification
 
