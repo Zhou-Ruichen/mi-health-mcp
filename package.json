@@ -1,6 +1,6 @@
 {
   "name": "mi-health-mcp",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "private": true,
   "type": "module",
   "description": "Xiaomi Fitness MCP server with robust personal-baseline analysis for Cloudflare Workers",
