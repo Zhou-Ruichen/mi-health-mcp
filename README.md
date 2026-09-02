@@ -39,6 +39,8 @@ npx wrangler secret put XIAOMI_DEVICE_ID
 
 也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 可选，设置时应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。
 
+passToken 登录已在真实账号上完成端到端验证（2026-09-02：passToken 换取 `miothealth` session、加密查询本人睡眠/心率/步数、KV session 缓存与复用）。session 过期后 Worker 会自动用 Secret 重新换取，无需人工干预；`health_login_status` 报「passToken 无效或已过期（Xiaomi Account code=70016）」时，表示该 passToken 对应的登录会话已被小米作废（例如修改密码、退出登录或账号安全策略），重新从有效登录会话复制 `userId`、`passToken` 和 `deviceId` 并更新 Secret 即可。
+
 KV binding 名必须保持为 `MI_HEALTH_KV`。`AUTH_TOKEN`、`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须使用 Cloudflare Secret，不要写入源码、配置文件或 Git。
 
 ## Hermes 配置
@@ -139,6 +141,12 @@ hermes cron edit <job-id> --add-skill mi-health
 本人数据使用 `POST /app/v1/data/get_fitness_data_by_time`。中国区查询窗口前后各扩展 18 小时，再按记录的 `zone_offset` 归入日期；缺少 `zone_offset` 时回退到 UTC+8。本人 steps 记录按接口的增量语义逐日汇总；本人 heart 采样点转换为每日统计；sleep 同日优先保留非小睡、持续时间更长、更新时间更新的记录。亲友数据使用 `/app/v1/relatives/*` 的 `daily_report`，同日记录不重复求和。
 
 MCP 返回使用字段白名单，不返回 `AUTH_TOKEN`、`passToken`、`cUserId`、`serviceToken`、`ssecurity` 或 Cookie。请勿提交 `.dev.vars`、`.env`、`wrangler.toml` 或 `.wrangler/`。
+
+## 致谢
+
+- [wusaki0723/mi-health-mcp](https://github.com/wusaki0723/mi-health-mcp)：本项目的直接前身，初始代码由此导入并沿用 GPL-3.0。
+- [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python)：`serviceLogin` / `serviceLoginAuth2` / STS 登录链路与亲友接口字段语义的参照。
+- [shkyyy18/mi_fitness_data_bridge](https://github.com/shkyyy18/mi_fitness_data_bridge)：确认了 passToken 登录的最小 Cookie 组合，以及 `serviceLogin` 返回的 `location` 必须原样请求（追加参数会使 `sts-hlth.io.mi.com` 拒绝下发 serviceToken）。
 
 ## 许可证
 
