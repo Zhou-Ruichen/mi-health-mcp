@@ -188,7 +188,7 @@ test("analysis ignores records outside the requested date window", () => {
   });
 });
 
-test("analysis returns insufficient data when a zero baseline has no usable scale", () => {
+test("analysis treats an all-zero-baseline median like workout analysis when scale is unusable", () => {
   const steps = [
     daily("2026-08-01", { steps: 0 }),
     daily("2026-08-02", { steps: 0 }),
@@ -204,8 +204,20 @@ test("analysis returns insufficient data when a zero baseline has no usable scal
     { currentDate: "2026-08-07", days: 8, recentDays: 3 },
   );
 
-  assert.equal(result.metrics.steps.comparison.status, "insufficient_data");
+  assert.equal(result.metrics.steps.baseline.median, 0);
+  assert.equal(result.metrics.steps.comparison.status, "above_baseline");
   assert.equal(result.metrics.steps.comparison.median_ratio, null);
+  assert.equal(result.metrics.steps.comparison.robust_z, null);
+
+  const flatZero = analyzeHealthSeries(
+    {
+      steps: steps.map((record) => ({ ...record, steps: 0 })),
+      sleep: [],
+      heart_rate: [],
+    },
+    { currentDate: "2026-08-07", days: 8, recentDays: 3 },
+  );
+  assert.equal(flatZero.metrics.steps.comparison.status, "within_baseline");
 });
 
 test("analysis compares unrounded medians and MAD values", () => {

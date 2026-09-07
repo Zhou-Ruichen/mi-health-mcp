@@ -18,6 +18,8 @@ npx wrangler kv namespace create MI_HEALTH_KV
 
 将命令输出的 namespace ID 写入 `wrangler.toml` 的 `kv_namespaces[0].id`。KV namespace ID 是 Cloudflare 资源标识，不是访问凭据；公开仓库必须提交 `wrangler.toml`，以便 Workers Builds 识别 Worker 入口和 binding。Fork 后部署前必须替换为自己账号中的 namespace ID。
 
+也可以在 Cloudflare Dashboard 的 Worker「Settings > Builds > Build configuration」里连接 GitHub 仓库，让 Workers Builds 在每次 push 到生产分支时自动构建并部署；未配置该集成时，推送不会自动部署，需要本地执行 `npx wrangler deploy`。
+
 然后设置访问令牌并部署：
 
 ```bash
@@ -37,7 +39,7 @@ npx wrangler secret put XIAOMI_PASS_TOKEN
 npx wrangler secret put XIAOMI_DEVICE_ID
 ```
 
-也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 可选，设置时应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。
+也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 可选，设置时应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。未设置 `XIAOMI_DEVICE_ID` 时，Worker 会在首次会话换取时生成并持久化一个 `an_` 设备 ID，后续刷新复用它，避免每次刷新都以新设备身份登录触发小米设备风控。
 
 passToken 登录已在真实账号上完成端到端验证（2026-09-02：passToken 换取 `miothealth` session、加密查询本人睡眠/心率/步数、KV session 缓存与复用）。session 过期后 Worker 会自动用 Secret 重新换取，无需人工干预；`health_login_status` 报「passToken 无效或已过期（Xiaomi Account code=70016）」时，表示该 passToken 对应的登录会话已被小米作废（例如修改密码、退出登录或账号安全策略），重新从有效登录会话复制 `userId`、`passToken` 和 `deviceId` 并更新 Secret 即可。
 

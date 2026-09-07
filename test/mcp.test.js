@@ -1065,6 +1065,7 @@ test("passToken secrets create and persist a miothealth session without storing 
   });
   const stored = JSON.parse(await kv.get(TOKEN_KEY));
   assert.equal(stored.auth_method, "pass_token");
+  assert.match(stored.device_id, /^an_[0-9a-f]{32}$/);
   assert.equal("pass_token" in stored, false);
   assert.doesNotMatch(JSON.stringify({ value, stored }), /synthetic-pass-token/);
   assert.equal(fetchImpl.accountCalls.length, 2);
@@ -1104,6 +1105,38 @@ test("health_login_refresh uses the configured browser deviceId without exposing
   assert.equal("pass_token" in stored, false);
   assert.doesNotMatch(JSON.stringify({ value, stored }), /synthetic-pass-token/);
   assert.equal(fetchImpl.accountCalls.length, 1);
+});
+
+test("passToken refresh without a configured deviceId reuses the persisted device id", async () => {
+  const kv = new MemoryKv({
+    [TOKEN_KEY]: JSON.stringify(tokenRecord({ auth_method: "qr" })),
+  });
+  const fetchImpl = passTokenSessionMock({
+    expectedDeviceId: "an_test",
+    directLogin: true,
+  });
+  const env = envWithKv(kv, {
+    XIAOMI_USER_ID: "synthetic-user",
+    XIAOMI_PASS_TOKEN: "synthetic-pass-token",
+  });
+  const worker = createWorker({ fetchImpl });
+  const refreshed = await callMcp(worker, env, {
+    jsonrpc: "2.0",
+    id: "reuse-device-id",
+    method: "tools/call",
+    params: { name: "health_login_refresh", arguments: {} },
+  });
+
+  const value = JSON.parse(refreshed.json.result.content[0].text);
+  assert.deepEqual(value, {
+    logged_in: true,
+    method: "pass_token",
+    user_id: "account-user",
+    session_valid: true,
+  });
+  const stored = JSON.parse(await kv.get(TOKEN_KEY));
+  assert.equal(stored.device_id, "an_test");
+  assert.equal(stored.auth_method, "pass_token");
 });
 
 test("passToken session survives a Worker restart and serves self health data", async () => {
@@ -1389,6 +1422,32 @@ test("relative series validates and sends only the requested relative_uid", asyn
   assert.doesNotMatch(result.json.result.content[0].text, /must-not-return/);
 });
 
+test("relative_uid strings with leading zeros are normalized to the canonical form", async () => {
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/relatives/get_relative_list": {
+      code: 0,
+      result: { relative_list: [{ relative_uid: 42, relative_note: "家人" }] },
+    },
+    "/app/v1/relatives/get_aggregated_data": (url, options, params) => {
+      assert.equal(params.relative_uid, "42");
+      return { code: 0, result: { data_list: [] } };
+    },
+  });
+  const worker = createWorker({ fetchImpl });
+  const result = await callMcp(worker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "relative-uid-leading-zeros",
+    method: "tools/call",
+    params: {
+      name: "health_steps",
+      arguments: { target: "relative", relative_uid: "0042", days: 1 },
+    },
+  });
+  assert.equal(result.json.result.isError, undefined);
+  assert.equal(JSON.parse(result.json.result.content[0].text).relative_uid, "42");
+});
+
 test("login tool descriptions recommend passToken and disclose QR 70036", async () => {
   const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
   const listed = await callMcp(worker, envWithKv(), {
@@ -1607,6 +1666,7 @@ test("QR start and poll store refreshed credentials without returning them", asy
   const startValue = JSON.parse(started.json.result.content[0].text);
   assert.equal(startValue.status, "pending");
   assert.equal(startValue.loginUrl, "https://account.xiaomi.com/qr-login");
+  assert.equal(startValue.qr_url, "https://account.xiaomi.com/qr-image");
   assert.ok(await kv.get(LOGIN_SESSION_KEY));
 
   const polled = await callMcp(worker, env, {

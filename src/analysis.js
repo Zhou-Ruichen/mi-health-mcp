@@ -110,8 +110,10 @@ function compare(recent, baseline) {
   const robustZ = scale ? delta / scale : null;
   const ratio = baseline.median !== 0 ? recent.median / baseline.median : null;
   if (robustZ === null && ratio === null) {
+    // 基线中位数与 MAD 同为 0：没有可用标度。与 workoutAnalysis 的
+    // compareMetric 保持一致——近期非零判为 above_baseline，同为零为 within_baseline。
     return {
-      status: "insufficient_data",
+      status: recent.median > 0 ? "above_baseline" : "within_baseline",
       median_delta: round(delta),
       median_ratio: null,
       robust_z: null,

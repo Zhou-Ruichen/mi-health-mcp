@@ -109,7 +109,7 @@ export async function handleRpc(message, env, fetchImpl = fetch) {
       result: {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "mi-health-mcp", version: "1.1.0" },
+        serverInfo: { name: "mi-health-mcp", version: "1.2.0" },
         instructions:
           "查询当前登录小米账号本人或已授权亲友的健康数据。默认 target=self；查询亲友前先调用 health_relatives，并以 target=relative 和 relative_uid 指定目标。需要趋势或合理分析时优先调用 health_analyze，并传入用户当前 IANA 时区以区分未结束的当日数据。推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 自动换取 miothealth 会话。二维码登录仅保留兼容，Xiaomi 可能返回 70036。",
       },

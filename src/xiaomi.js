@@ -304,7 +304,11 @@ export async function exchangePassTokenSession(
       { authExpired: false },
     );
   }
-  const deviceId = credentials.deviceId || randomDeviceId();
+  // XIAOMI_DEVICE_ID 未配置时复用 KV 中已持久化的 device_id，保持设备连续性，
+  // 避免每次会话刷新都以新设备身份登录触发小米设备风控（70016）。
+  const deviceId = credentials.deviceId
+    || (await loadToken(env).catch(() => null))?.device_id
+    || randomDeviceId();
   const url = new URL(XIAOMI_SERVICE_LOGIN_URL);
   url.searchParams.set("_json", "true");
   url.searchParams.set("sid", SERVICE_SID);
@@ -1136,8 +1140,9 @@ export async function startQrLogin(env, fetchImpl = fetch, now = Date.now()) {
   return {
     status: "pending",
     loginUrl: data.loginUrl,
+    ...(typeof data.qr === "string" && data.qr ? { qr_url: data.qr } : {}),
     expires_at: expiresAt,
-    message: "兼容二维码已生成；该流程可能被 Xiaomi 拒绝并返回 70036",
+    message: "兼容二维码已生成；该流程可能被 Xiaomi 拒绝并返回 70036，推荐改用 passToken Secret",
   };
 }
 

@@ -344,7 +344,11 @@ function parseTarget(args) {
   if (!validUid) {
     throw new ToolValidationError("target=relative 时必须提供正整数 relative_uid；请先调用 health_relatives");
   }
-  return { target, relative_uid: String(relativeUid) };
+  // 前导零归一化，与 health_relatives 返回的 canonical 形式一致。
+  const normalizedUid = typeof relativeUid === "number"
+    ? String(relativeUid)
+    : String(relativeUid).replace(/^0+/, "");
+  return { target, relative_uid: normalizedUid };
 }
 
 async function getHealthAnalysis(env, args, fetchImpl) {
