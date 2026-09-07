@@ -41,7 +41,7 @@ npx wrangler secret put XIAOMI_DEVICE_ID
 
 也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 可选，设置时应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。未设置 `XIAOMI_DEVICE_ID` 时，Worker 会在首次会话换取时生成并持久化一个 `an_` 设备 ID，后续刷新复用它，避免每次刷新都以新设备身份登录触发小米设备风控。
 
-passToken 登录已在真实账号上完成端到端验证（2026-09-02：passToken 换取 `miothealth` session、加密查询本人睡眠/心率/步数、KV session 缓存与复用）。session 过期后 Worker 会自动用 Secret 重新换取，无需人工干预；`health_login_status` 报「passToken 无效或已过期（Xiaomi Account code=70016）」时，表示该 passToken 对应的登录会话已被小米作废（例如修改密码、退出登录或账号安全策略），重新从有效登录会话复制 `userId`、`passToken` 和 `deviceId` 并更新 Secret 即可。
+passToken 登录已在真实账号上完成端到端验证（2026-09-02：passToken 换取 `miothealth` session、加密查询本人睡眠/心率/步数、KV session 缓存与复用）。session 过期后 Worker 会自动用 Secret 重新换取，无需人工干预；`health_login_status` 报「passToken 无效或已过期（Xiaomi Account code=70016）」时，表示该 passToken 对应的登录会话已被小米作废（例如修改密码、退出登录或账号安全策略）。恢复时在本机运行 `bash scripts/relogin.sh`：脚本会打开浏览器让你扫码登录，自动读取新 Cookie 更新 Secret 并验证，无需手工复制 Cookie。
 
 KV binding 名必须保持为 `MI_HEALTH_KV`。`AUTH_TOKEN`、`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须使用 Cloudflare Secret，不要写入源码、配置文件或 Git。
 
@@ -59,7 +59,7 @@ mcp_servers:
 
 ### Hermes skill
 
-仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.5.2）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
+仓库内的 [`skills/mi-health/SKILL.md`](skills/mi-health/SKILL.md)（当前 v1.6.0）负责把“我/本人”和“亲友”请求分流到正确工具，说明紧凑结果的字段含义，并在用户询问健康变化原因时，按同一时间窗口只读对照日志和日历。健康数据是定量测量，日志是实际发生记录，日历是计划记录；不会把日历计划直接当成已完成活动，也不会自动写入或修改日志、日历。仓库公开后，可从原始文件 URL 安装：
 
 ```bash
 hermes skills install https://raw.githubusercontent.com/<your-github-account>/mi-health-mcp/main/skills/mi-health/SKILL.md

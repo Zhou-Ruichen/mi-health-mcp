@@ -1,7 +1,7 @@
 ---
 name: mi-health
 description: Use when querying or analyzing Xiaomi Mi Fitness data through MCP.
-version: 1.5.2
+version: 1.6.0
 license: GPL-3.0
 metadata:
   hermes:
@@ -253,6 +253,23 @@ Do not call refresh speculatively because it performs an account login
 exchange. `health_login_start` and `health_login_poll` exist for compatibility,
 but Xiaomi can reject QR login with error `70036`; do not describe QR login as
 universally supported or automatically retry it.
+
+When `health_login_status` reports the passToken is invalid (Xiaomi error
+`70016`, typically after Xiaomi invalidates the browser session or escalates
+device risk control), run the local recovery script instead of asking the user
+to copy cookies by hand:
+
+```bash
+bash ~/Services/mi-health-mcp/scripts/relogin.sh
+```
+
+The script opens a headed browser at the Xiaomi account login page, waits for
+the user to scan the QR code (up to 4 minutes), extracts the session cookies,
+updates the `XIAOMI_USER_ID`, `XIAOMI_PASS_TOKEN`, and `XIAOMI_DEVICE_ID`
+Cloudflare secrets, and verifies `health_login_status`. Tell the user they
+only need to scan the QR once. Cookie values never appear in chat or terminal
+output. If the script cannot find the auth token, it still updates the secrets
+and asks for a manual `health_login_status` call.
 
 ## Coordinate With Other Skills
 
