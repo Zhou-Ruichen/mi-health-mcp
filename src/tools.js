@@ -42,21 +42,8 @@ const targetSchema = {
   properties: {
     ...targetProperties,
   },
-  allOf: [
-    {
-      if: { properties: { target: { const: "relative" } }, required: ["target"] },
-      then: { required: ["relative_uid"] },
-    },
-    {
-      if: {
-        anyOf: [
-          { not: { required: ["target"] } },
-          { properties: { target: { const: "self" } }, required: ["target"] },
-        ],
-      },
-      then: { not: { required: ["relative_uid"] } },
-    },
-  ],
+  // target=self 时禁止 relative_uid 的校验在 parseTarget 运行时完成，
+  // 此处不再用 schema 条件分支（部分客户端会错误求值 not 分支）。
   additionalProperties: false,
 };
 
@@ -72,7 +59,6 @@ const daysSchema = {
       description: "查询天数，默认 7，最多 30。",
     },
   },
-  allOf: targetSchema.allOf,
   additionalProperties: false,
 };
 
@@ -118,7 +104,6 @@ const analysisSchema = {
     },
     timezone: timezoneProperty,
   },
-  allOf: targetSchema.allOf,
   additionalProperties: false,
 };
 
