@@ -1,4 +1,5 @@
 import { timingSafeTextEqual } from "./crypto.js";
+import { diagnosticsPayload } from "./diagnostics.js";
 import { callTool, ToolPublicError, TOOLS } from "./tools.js";
 import { XiaomiError } from "./xiaomi.js";
 
@@ -72,11 +73,14 @@ function toolError(error) {
       )
       .slice(0, 2000)
     : "请求失败；详情已隐藏";
+  const result = { ok: false, error: message };
+  const diagnostics = diagnosticsPayload(error);
+  if (diagnostics) result.diagnostics = diagnostics;
   return {
     content: [
       {
         type: "text",
-        text: JSON.stringify({ ok: false, error: message }),
+        text: JSON.stringify(result),
       },
     ],
     isError: true,

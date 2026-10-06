@@ -2,6 +2,11 @@ import {
   buildEncryptedParams,
   decryptResponse,
 } from "./crypto.js";
+import {
+  beginRequest,
+  diagnoseAuth,
+  operationForPath,
+} from "./diagnostics.js";
 
 export const TOKEN_KEY = "mi_fitness_token";
 export const LOGIN_SESSION_KEY = "mi_fitness_login_session";
@@ -27,6 +32,7 @@ const LOGIN_USER_AGENT =
   "SDKV/5.3.0.release.68 CPN/com.mi.health PassportSDK/";
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const REQUEST_DEADLINE_MS = 30_000;
 const CST_OFFSET_SECONDS = 8 * 60 * 60;
 const MAX_TIMEZONE_OFFSET_SECONDS = 18 * 60 * 60;
 
@@ -54,15 +60,45 @@ function requireKv(env) {
   return env.MI_HEALTH_KV;
 }
 
-async function readTextLimited(response, maxBytes = MAX_RESPONSE_BYTES) {
+async function readTextLimited(response, signal = null, maxBytes = MAX_RESPONSE_BYTES) {
   if (!response.body) return "";
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let size = 0;
   let text = "";
 
+  // Single choke point: every read (including the first) re-checks the signal,
+  // so a deadline that expires before or between reads is caught here —
+  // never rely on an abort event that may already have fired.
+  const cancelRead = () => reader.cancel().catch(() => {});
+  const readTimeout = () => new XiaomiApiError("小米接口响应读取超时");
+  const readWithDeadline = () => {
+    if (!signal) return reader.read();
+    if (signal.aborted) {
+      cancelRead();
+      return Promise.reject(readTimeout());
+    }
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        cancelRead();
+        reject(readTimeout());
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      reader.read().then(
+        (result) => {
+          signal.removeEventListener("abort", onAbort);
+          resolve(result);
+        },
+        (error) => {
+          signal.removeEventListener("abort", onAbort);
+          reject(error);
+        },
+      );
+    });
+  };
+
   while (true) {
-    const { done, value } = await reader.read();
+    const { done, value } = await readWithDeadline();
     if (done) break;
     size += value.byteLength;
     if (size > maxBytes) {
@@ -292,10 +328,18 @@ function passTokenCredentials(env) {
   return { userId, passToken, deviceId };
 }
 
-export async function exchangePassTokenSession(
+export function exchangePassTokenSession(
   env,
   fetchImpl = fetch,
   now = Date.now(),
+) {
+  return diagnoseAuth(() => exchangePassTokenSessionInner(env, fetchImpl, now));
+}
+
+async function exchangePassTokenSessionInner(
+  env,
+  fetchImpl,
+  now,
 ) {
   const credentials = passTokenCredentials(env);
   if (!credentials) {
@@ -461,7 +505,24 @@ async function requireSelfToken(env, fetchImpl = fetch) {
   return token;
 }
 
-async function encryptedRequest(fetchImpl, token, method, path, params) {
+async function encryptedRequest(fetchImpl, token, method, path, params, deadlineMs = REQUEST_DEADLINE_MS) {
+  const diag = beginRequest(operationForPath(path));
+  try {
+    return await encryptedRequestInner(
+      diag,
+      fetchImpl,
+      token,
+      method,
+      path,
+      params,
+      deadlineMs,
+    );
+  } catch (error) {
+    throw diag.fail(error);
+  }
+}
+
+async function encryptedRequestInner(diag, fetchImpl, token, method, path, params, deadlineMs) {
   const encrypted = await buildEncryptedParams(
     method,
     path,
@@ -478,7 +539,7 @@ async function encryptedRequest(fetchImpl, token, method, path, params) {
       serviceToken: token.service_token,
     }),
   };
-  const options = { method, headers };
+  const options = { method, headers, signal: AbortSignal.timeout(deadlineMs) };
 
   if (method === "GET") {
     for (const [name, value] of Object.entries(encrypted)) {
@@ -489,8 +550,23 @@ async function encryptedRequest(fetchImpl, token, method, path, params) {
     options.body = new URLSearchParams(encrypted).toString();
   }
 
-  const response = await fetchImpl(url, options);
-  const body = await readTextLimited(response);
+  let response;
+  diag.setPhase("fetch");
+  try {
+    response = await fetchImpl(url, options);
+  } catch (error) {
+    if (options.signal.aborted && error?.name === "TimeoutError") {
+      // Deadline hit during the fetch itself; convert the opaque native error
+      // into a public XiaomiApiError so logs/clients see a timeout, not auth.
+      throw new XiaomiApiError(
+        `小米接口请求超时（${Math.round(deadlineMs / 1000)} 秒无响应）`,
+      );
+    }
+    throw error;
+  }
+  diag.setPhase("body");
+  const body = await readTextLimited(response, options.signal);
+  diag.setHttpStatus(response.status);
   if (response.status === 401 || response.status === 403) {
     throw new XiaomiAuthError(`小米鉴权失败（HTTP ${response.status}）`);
   }
@@ -498,6 +574,7 @@ async function encryptedRequest(fetchImpl, token, method, path, params) {
     throw new XiaomiApiError(`小米接口请求失败（HTTP ${response.status}）`);
   }
 
+  diag.setPhase("parse");
   let result;
   try {
     result = await decryptResponse(token.ssecurity, encrypted._nonce, body);
@@ -595,7 +672,7 @@ export async function getHealthMe(env, fetchImpl = fetch) {
   };
 }
 
-async function getSelfPagedRecords(token, path, baseParams, listKey, fetchImpl) {
+async function getSelfPagedRecords(token, path, baseParams, listKey, fetchImpl, deadlineMs = REQUEST_DEADLINE_MS) {
   const records = [];
   const seenNextKeys = new Set();
   let nextKey;
@@ -606,6 +683,7 @@ async function getSelfPagedRecords(token, path, baseParams, listKey, fetchImpl) 
       "POST",
       path,
       nextKey ? { ...baseParams, next_key: nextKey } : baseParams,
+      deadlineMs,
     );
     const result = responseResult(response);
     if (Array.isArray(result[listKey])) records.push(...result[listKey]);
@@ -618,13 +696,14 @@ async function getSelfPagedRecords(token, path, baseParams, listKey, fetchImpl) 
   }
 }
 
-function getSelfFitnessItems(token, key, start, end, fetchImpl) {
+export function getSelfFitnessItems(token, key, start, end, fetchImpl, deadlineMs = REQUEST_DEADLINE_MS) {
   return getSelfPagedRecords(
     token,
     SELF_FITNESS_BY_TIME_PATH,
     { start_time: start, end_time: end, key },
     "data_list",
     fetchImpl,
+    deadlineMs,
   );
 }
 
@@ -1079,7 +1158,11 @@ export async function getHealthSeries(
   };
 }
 
-export async function startQrLogin(env, fetchImpl = fetch, now = Date.now()) {
+export function startQrLogin(env, fetchImpl = fetch, now = Date.now()) {
+  return diagnoseAuth(() => startQrLoginInner(env, fetchImpl, now));
+}
+
+async function startQrLoginInner(env, fetchImpl, now) {
   const deviceId = randomDeviceId();
   const url = new URL(XIAOMI_QR_LOGIN_URL);
   const params = {
@@ -1222,7 +1305,11 @@ async function exchangeSts(fetchImpl, deviceId, cookies, now) {
   }
 }
 
-export async function pollQrLogin(env, fetchImpl = fetch, now = Date.now()) {
+export function pollQrLogin(env, fetchImpl = fetch, now = Date.now()) {
+  return diagnoseAuth(() => pollQrLoginInner(env, fetchImpl, now));
+}
+
+async function pollQrLoginInner(env, fetchImpl, now) {
   const session = await loadLoginSession(env);
   if (!session) {
     return {
