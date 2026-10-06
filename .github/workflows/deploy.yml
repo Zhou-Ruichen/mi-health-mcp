@@ -1,0 +1,29 @@
+name: Deploy Worker
+
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'wrangler.toml', 'package.json', 'package-lock.json', 'test/**']
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run tests
+        run: node --test
+
+      - name: Deploy to Cloudflare
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CF_API_TOKEN }}
+          command: deploy
