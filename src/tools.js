@@ -172,7 +172,7 @@ export const TOOLS = [
   },
   {
     name: "health_me",
-    description: "查看当前登录的小米账号状态和 user_id，不会返回任何认证凭证。未登录或凭证不完整时提示配置 passToken Secret 或运行登录工具。",
+    description: "查看当前登录的小米账号状态和 user_id，不会返回任何认证凭证。未登录时提示用 health_login_start 取二维码并轮询 health_login_poll。",
     inputSchema: emptySchema,
   },
   {
@@ -182,7 +182,7 @@ export const TOOLS = [
   },
   {
     name: "health_login_status",
-    description: "查看当前健康 API 会话状态。推荐配置 XIAOMI_USER_ID、XIAOMI_PASS_TOKEN 和浏览器 Cookie 中的 XIAOMI_DEVICE_ID；不会返回任何 token 或 cookie。",
+    description: "查看当前健康 API 会话状态。未登录时用 health_login_start + health_login_poll 扫码登录；不会返回任何 token 或 cookie。",
     inputSchema: emptySchema,
   },
   {
@@ -192,12 +192,12 @@ export const TOOLS = [
   },
   {
     name: "health_login_start",
-    description: "兼容用的小米账号扫码登录入口。二维码登录可能被 Xiaomi 拒绝并返回 70036，推荐改用 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN。",
+    description: "发起小米账号扫码登录并返回二维码地址。这是目前实测唯一可用的登录方式：服务端用 passToken 调 serviceLogin 会被小米以 70016 拒绝，且不会下发验证码。请把二维码展示给用户，用手机“设置 > 小米账号 > 扫一扫”扫描，再轮询 health_login_poll。",
     inputSchema: emptySchema,
   },
   {
     name: "health_login_poll",
-    description: "轮询兼容用的扫码登录结果。二维码登录可能收到 Xiaomi 70036；成功时才会缓存健康会话。",
+    description: "轮询扫码登录结果，直到用户扫码确认。成功时把健康会话写入 KV；二维码约 5 分钟过期，过期需重新调用 health_login_start。",
     inputSchema: emptySchema,
   },
 ];

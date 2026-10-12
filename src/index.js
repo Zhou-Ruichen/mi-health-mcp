@@ -115,7 +115,7 @@ export async function handleRpc(message, env, fetchImpl = fetch) {
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: "mi-health-mcp", version: "1.2.0" },
         instructions:
-          "查询当前登录小米账号本人或已授权亲友的健康数据。默认 target=self；查询亲友前先调用 health_relatives，并以 target=relative 和 relative_uid 指定目标。需要趋势或合理分析时优先调用 health_analyze，并传入用户当前 IANA 时区以区分未结束的当日数据。推荐配置 XIAOMI_USER_ID 和 XIAOMI_PASS_TOKEN 自动换取 miothealth 会话。二维码登录仅保留兼容，Xiaomi 可能返回 70036。",
+          "查询当前登录小米账号本人或已授权亲友的健康数据。默认 target=self；查询亲友前先调用 health_relatives，并以 target=relative 和 relative_uid 指定目标。需要趋势或合理分析时优先调用 health_analyze，并传入用户当前 IANA 时区以区分未结束的当日数据。未登录时用 health_login_start 取得二维码、再用 health_login_poll 轮询结果；扫码是目前唯一实测可用的登录方式。",
       },
     };
   }
@@ -165,21 +165,33 @@ export async function handleRpc(message, env, fetchImpl = fetch) {
   return rpcError(id, -32601, `method not found: ${method}`);
 }
 
-async function bearerAuthorized(request, expected) {
+// Bearer 头只认主 AUTH_TOKEN；URL 里的凭证只认独立的 CONNECTOR_TOKEN。
+// 两者分开，主 token 就永远不会出现在 URL 中，也就不会落进 Cloudflare 的边缘访问日志。
+function bearerToken(request) {
   const authorization = request.headers.get("Authorization") || "";
   const match = authorization.match(/^Bearer\s+(.+)$/i);
-  const provided = match ? match[1].trim() : "";
-  return timingSafeTextEqual(provided, expected);
+  return match ? match[1].trim() : "";
 }
 
-async function handleMcpRequest(request, env, fetchImpl) {
+async function authorized(request, url, env) {
+  if (await timingSafeTextEqual(bearerToken(request), env.AUTH_TOKEN)) {
+    return true;
+  }
+  const connectorToken =
+    typeof env.CONNECTOR_TOKEN === "string" ? env.CONNECTOR_TOKEN.trim() : "";
+  const urlToken = (url.searchParams.get("token") || "").trim();
+  if (!connectorToken || !urlToken) return false;
+  return timingSafeTextEqual(urlToken, connectorToken);
+}
+
+async function handleMcpRequest(request, env, fetchImpl, url) {
   if (!env?.AUTH_TOKEN) {
     return jsonResponse(
       { error: "server misconfigured: AUTH_TOKEN not set" },
       500,
     );
   }
-  if (!(await bearerAuthorized(request, env.AUTH_TOKEN))) {
+  if (!(await authorized(request, url, env))) {
     return jsonResponse(
       { error: "unauthorized" },
       401,
@@ -236,7 +248,7 @@ export function createWorker({ fetchImpl = fetch } = {}) {
       if (url.pathname !== "/mcp") {
         return jsonResponse({ error: "not found" }, 404);
       }
-      return handleMcpRequest(request, env, fetchImpl);
+      return handleMcpRequest(request, env, fetchImpl, url);
     },
   };
 }

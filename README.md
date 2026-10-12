@@ -2,7 +2,7 @@
 
 ## 项目简介
 
-mi-health-mcp 把当前登录小米账号本人及已授权亲友的睡眠、心率和步数，通过 MCP 协议提供给 Hermes 等 MCP 客户端。服务运行在 Cloudflare Workers 上。本项目源自 [wusaki0723/mi-health-mcp](https://github.com/wusaki0723/mi-health-mcp)，保留 GPL-3.0 许可证，并参考 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 与 [shkyyy18/mi_fitness_data_bridge](https://github.com/shkyyy18/mi_fitness_data_bridge) 的接口实现。
+mi-health-mcp 把当前登录小米账号本人及已授权亲友的睡眠、心率和步数，通过 MCP 协议提供给 Hermes、ChatGPT 自定义连接器等 MCP 客户端。服务运行在 Cloudflare Workers 上。本项目源自 [wusaki0723/mi-health-mcp](https://github.com/wusaki0723/mi-health-mcp)，保留 GPL-3.0 许可证，并参考 [Misty02600/mi-fitness-python](https://github.com/Misty02600/mi-fitness-python) 与 [shkyyy18/mi_fitness_data_bridge](https://github.com/shkyyy18/mi_fitness_data_bridge) 的接口实现。
 
 ## 部署
 
@@ -29,6 +29,14 @@ npx wrangler deploy
 
 `AUTH_TOKEN` 的值请使用自己生成的长随机串，不要写进源码、`wrangler.toml` 或 Git。
 
+`AUTH_TOKEN` 只通过 `Authorization: Bearer` 请求头使用。部分 MCP 客户端（例如 ChatGPT 自定义连接器）只能选择 OAuth 或不鉴权，无法发送自定义请求头，此时如果直接把 `AUTH_TOKEN` 放进 URL，它会随 URL 一起进入 Cloudflare 的边缘访问日志。为避免主令牌落到日志里，Worker 额外支持一个**独立的** `CONNECTOR_TOKEN`，仅用于 URL 形式（`?token=`）的鉴权；两者互不通用：
+
+```bash
+npx wrangler secret put CONNECTOR_TOKEN
+```
+
+未配置 `CONNECTOR_TOKEN` 时，URL 形式的鉴权整体关闭，`?token=` 一律返回 401。用 `AUTH_TOKEN` 去填 `?token=` 同样返回 401——主令牌不会因为这种用法而出现在 URL 中。注意 URL 形式的凭证仍会出现在你选择使用的客户端和 Cloudflare 侧记录的完整 URL 里，因此 `CONNECTOR_TOKEN` 应视为可公开轮换的次级凭据，泄露后直接重新设置新值即可，无需改动 `AUTH_TOKEN`。
+
 ### passToken 登录
 
 推荐将 Xiaomi Account 浏览器 Cookie 中的 `userId`、`passToken` 和 `deviceId` 作为 Cloudflare Secret 设置。`deviceId` 通常以 `wb_` 开头。Worker 会用它们换取 `sid=miothealth` 的短期健康 API session；原始 `passToken` 不会写入 KV、日志或 MCP 返回。
@@ -41,7 +49,22 @@ npx wrangler secret put XIAOMI_DEVICE_ID
 
 也可以在 Cloudflare Dashboard 的 Worker「Settings > Variables and Secrets」中新增同名的 Secret。`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须同时设置；`XIAOMI_DEVICE_ID` 可选，设置时应使用取得该 `passToken` 时同一浏览器会话中的 `deviceId`。未设置 `XIAOMI_DEVICE_ID` 时，Worker 会在首次会话换取时生成并持久化一个 `an_` 设备 ID，后续刷新复用它，避免每次刷新都以新设备身份登录触发小米设备风控。
 
-passToken 登录已在真实账号上完成端到端验证（2026-09-02：passToken 换取 `miothealth` session、加密查询本人睡眠/心率/步数、KV session 缓存与复用）。session 过期后 Worker 会自动用 Secret 重新换取，无需人工干预；`health_login_status` 报「passToken 无效或已过期（Xiaomi Account code=70016）」时，表示该 passToken 对应的登录会话已被小米作废（例如修改密码、退出登录或账号安全策略）。恢复时在本机运行 `bash scripts/relogin.sh`：脚本会打开浏览器让你扫码登录，自动读取新 Cookie 更新 Secret 并验证，无需手工复制 Cookie。
+passToken 登录在部分账号上可用（2026-09-02 曾在真实账号上完成端到端验证：passToken 换取 `miothealth` session、加密查询本人睡眠/心率/步数、KV session 缓存与复用）。但**不要把 passToken 当作唯一的登录或恢复手段**。2026-10-12 在一个真实账号上复核时，同一份刚由浏览器登录产生、且已在该浏览器中确认有效的 `passToken`，从服务端调用会被稳定拒绝：
+
+- `GET https://account.xiaomi.com/pass/serviceLogin?_json=true&sid=miothealth` 与 `POST /pass/serviceLoginAuth2` 都返回 `code=70016`（`登录验证失败`），无 `ssecurity`、无 `location`。
+- 该响应 `captchaUrl` 为 `null`、`type` 不是 `manMachine`，**小米不会下发验证码**，因此不存在可提交的验证码。用 `type:"manMachine"` 之外的方式去实现验证码交互不会生效。
+- 逐项排除：出口 IP（Cloudflare 边缘与家用宽带上的 Node 客户端结果一致）、完整浏览器 Cookie 集（含 `JSESSIONID`、`passport_ph`/`passport_slh`、`cUserId`、`sdkVersion`、`pass_ua`）、完整 Chrome 请求头集（`sec-ch-ua`、`sec-fetch-*`、`Referer`、`Origin`、`Accept-Language`）——三组对照与裸请求的结果完全相同。
+- 剩下无法在服务端复现的只有浏览器的 TLS/HTTP 指纹。**结论：不要通过调整 Cookie 或请求头来「修复」70016**，这条路径在服务端不受本项目控制。
+
+`code=70016` 的响应会附带一串 `passToken=EXPIRED`、`userId=EXPIRED`、`cUserId=EXPIRED`、`serviceToken=EXPIRED` 等清除指令，**这不能作为「passToken 已作废」的证据**：完全不发送任何 Cookie 调用同一接口时，小米返回的清除指令完全相同，它只是通用的「未认证，请丢弃这些」标记。
+
+`health_login_status` 报「passToken 无效或已过期（Xiaomi Account code=70016）」时，请改用下面的扫码登录，不要反复重试 passToken 换取。恢复时在本机运行 `bash scripts/relogin.sh`：脚本会打开浏览器让你扫码登录，自动读取新 Cookie 更新 Secret 并验证，无需手工复制 Cookie。
+
+### 扫码登录
+
+`health_login_start` 取得一次性二维码，`health_login_poll` 轮询结果；二维码约 5 分钟过期，过期重新调用 `health_login_start` 即可。用手机「设置 > 小米账号 > 扫一扫」或小米运动健康 App 扫描。成功时长轮询响应会带回该会话签发的 `ssecurity`、`passToken` 和 `location`，Worker 用 `location` 换取 `serviceToken` 并写入 KV，全程不需要手工复制 Cookie。
+
+该流程已在真实账号上端到端验证（2026-10-12：扫码后用 `health_latest`、`health_sleep`、`health_steps` 取到本人真实睡眠与步数记录）。启用方式：在 Worker 端不配置任何 `XIAOMI_*` Secret，直接调用 `health_login_start`。
 
 KV binding 名必须保持为 `MI_HEALTH_KV`。`AUTH_TOKEN`、`XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 必须使用 Cloudflare Secret，不要写入源码、配置文件或 Git。
 
@@ -77,15 +100,29 @@ hermes cron edit <job-id> --add-skill mi-health
 
 定时任务在独立会话中执行，prompt 需要明确查询目标、天数、时区、发送位置和失败时的处理方式。不要在 prompt 中放入任何凭证；定期任务应固定 provider 和 model，避免全局默认值变化后行为改变。
 
+## ChatGPT 自定义连接器
+
+支持接入 ChatGPT 的自定义连接器（Developer mode → Add connector）。ChatGPT 的连接器只能选择 OAuth 或不鉴权，无法发送自定义请求头，因此这里走 URL 形式的凭据：
+
+1. 设置一个与 `AUTH_TOKEN` **不同**的连接器令牌：
+
+   ```bash
+   npx wrangler secret put CONNECTOR_TOKEN
+   ```
+
+2. 在 ChatGPT 中添加连接器，URL 填 `https://<worker-name>.<account-subdomain>.workers.dev/mcp?token=<CONNECTOR_TOKEN>`，鉴权方式选「不鉴权 / No authentication」。
+
+不要把 `AUTH_TOKEN` 填进 `?token=`：URL 形式只认 `CONNECTOR_TOKEN`，填 `AUTH_TOKEN` 会返回 401。这样主令牌永远不会出现在 URL 里，也就不会进入 Cloudflare 的边缘访问日志；`CONNECTOR_TOKEN` 独立于 `AUTH_TOKEN`，需要轮换时只重设它即可，已配置 Bearer 头的客户端不受影响。
+
 ## 使用流程
 
-1. 配置 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN` 后调用 `health_login_refresh`；`XIAOMI_DEVICE_ID` 为可选 Secret，用于在需要时指定取得该 `passToken` 的浏览器会话。Worker 会换取并缓存 `miothealth` session；失败时不会删除当前缓存会话。
+1. 用 `health_login_start` 取二维码并展示给用户，用户扫码后轮询 `health_login_poll` 直到成功；Worker 会换取并缓存 `miothealth` session。若你的账号可以使用 passToken 登录，也可以配置 `XIAOMI_USER_ID` 和 `XIAOMI_PASS_TOKEN`（`XIAOMI_DEVICE_ID` 可选）后调用 `health_login_refresh`；服务端被小米以 `70016` 拒绝时请回到扫码流程，失败时不会删除当前缓存会话。
 2. 使用 `health_me` 确认当前账号；查询单项原始摘要时调用 `health_latest`、`health_sleep`、`health_heart`、`health_steps` 或 `health_workouts`，需要趋势分析时优先调用 `health_analyze` 并传入用户当前 IANA 时区。
 3. 查询亲友时先调用 `health_relatives`，再传入 `target: "relative"` 和返回的 `relative_uid`。
 
 对于“为什么负荷增加”等原因问题，先完成 `health_analyze`，再只读查询相同日期范围内的日志和日历（若可用）。日志用于核对实际发生的活动，日历用于识别计划安排；二者与健康数据不一致时应明确说明，不能静默合并。
 
-`health_login_start` 和 `health_login_poll` 仅为兼容保留。该二维码流程在部分账号会被 Xiaomi 拒绝并返回 `70036`，小米运动健康 App 也可能提示二维码不受支持；本项目不把它描述为已验证可用的登录方式。
+`health_login_start` 和 `health_login_poll` 是当前推荐的登录方式，已在真实账号上端到端验证（见上文「扫码登录」）。部分账号或客户端仍可能遇到 `70036`（二维码被拒绝），或 App 提示二维码不受支持；遇到时重新调用 `health_login_start` 换取新二维码，或改用 passToken Secret。
 
 健康查询默认 `target: "self"`，使用本人数据接口，不发送 `relative_uid`；亲友查询必须提供有效的 `relative_uid`，不会自动选择亲友列表第一项。
 
