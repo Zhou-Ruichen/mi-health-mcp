@@ -196,6 +196,41 @@ test("MCP endpoint rejects missing and invalid Bearer tokens", async () => {
   assert.equal(invalid.status, 401);
 });
 
+function mcpQueryRequest(token) {
+  const url = new URL("https://worker.example/mcp");
+  if (token !== undefined) url.searchParams.set("token", token);
+  return new Request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize" }),
+  });
+}
+
+test("the URL token path only accepts CONNECTOR_TOKEN, never AUTH_TOKEN", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+
+  // 主 AUTH_TOKEN 走 URL 必须被拒——否则它会出现在 URL 里，进而落进边缘访问日志
+  const masterInUrl = await worker.fetch(
+    mcpQueryRequest(AUTH_TOKEN),
+    envWithKv(new MemoryKv(), { CONNECTOR_TOKEN: "connector-secret" }),
+  );
+  assert.equal(masterInUrl.status, 401);
+
+  // 独立的 CONNECTOR_TOKEN 是 URL 路径唯一认的凭证
+  const connector = await worker.fetch(
+    mcpQueryRequest("connector-secret"),
+    envWithKv(new MemoryKv(), { CONNECTOR_TOKEN: "connector-secret" }),
+  );
+  assert.equal(connector.status, 200);
+
+  // 未配置 CONNECTOR_TOKEN 时，URL 路径整体关闭
+  const unconfigured = await worker.fetch(mcpQueryRequest("connector-secret"), envWithKv());
+  assert.equal(unconfigured.status, 401);
+
+  // 少了 token 参数同样拒绝
+  assert.equal((await worker.fetch(mcpQueryRequest(), envWithKv())).status, 401);
+});
+
 test("Worker health check is available without MCP authorization", async () => {
   const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
   const response = await worker.fetch(new Request("https://worker.example/"), envWithKv());
@@ -1448,7 +1483,7 @@ test("relative_uid strings with leading zeros are normalized to the canonical fo
   assert.equal(JSON.parse(result.json.result.content[0].text).relative_uid, "42");
 });
 
-test("login tool descriptions recommend passToken and disclose QR 70036", async () => {
+test("login tool descriptions present QR login as the working path", async () => {
   const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
   const listed = await callMcp(worker, envWithKv(), {
     jsonrpc: "2.0",
@@ -1456,9 +1491,15 @@ test("login tool descriptions recommend passToken and disclose QR 70036", async 
     method: "tools/list",
   });
   const tools = new Map(listed.json.result.tools.map((tool) => [tool.name, tool]));
-  assert.match(tools.get("health_login_status").description, /推荐.*XIAOMI_USER_ID.*XIAOMI_PASS_TOKEN/);
-  assert.match(tools.get("health_login_start").description, /70036/);
-  assert.match(tools.get("health_login_poll").description, /70036/);
+  // 服务端 passToken 换取会被小米以 70016 拒绝且不下发验证码，
+  // 描述必须把扫码指向为可用路径，不能反过来推荐 passToken。
+  assert.match(tools.get("health_login_status").description, /health_login_start/);
+  assert.match(tools.get("health_login_start").description, /health_login_poll/);
+  assert.match(tools.get("health_login_start").description, /70016/);
+  assert.match(tools.get("health_login_poll").description, /health_login_start/);
+  for (const name of ["health_login_start", "health_login_poll"]) {
+    assert.doesNotMatch(tools.get(name).description, /推荐改用\s*XIAOMI_USER_ID/);
+  }
 });
 
 test("an expired health session is renewed from passToken secrets and retried", async () => {
