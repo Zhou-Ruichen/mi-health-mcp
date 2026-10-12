@@ -9,6 +9,13 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORKER_URL="${MI_HEALTH_WORKER_URL:-https://mi-health-mcp.zhourccc.workers.dev/mcp}"
 AUTH_TOKEN="${MI_HEALTH_MCP_AUTH_TOKEN:-}"
+# 复用系统 Chrome，避免 agent-browser 下载自带的 Chrome for Testing（约 500MB）。
+# 如需回到自带浏览器，运行前设置 MI_HEALTH_BROWSER= 即可。
+if [[ -z "${MI_HEALTH_BROWSER+x}" && -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+  export AGENT_BROWSER_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+elif [[ -n "${MI_HEALTH_BROWSER:-}" ]]; then
+  export AGENT_BROWSER_EXECUTABLE_PATH="$MI_HEALTH_BROWSER"
+fi
 if [ -z "$AUTH_TOKEN" ] && [ -f "$HOME/.hermes/.env" ]; then
   AUTH_TOKEN=$(grep "^MI_HEALTH_MCP_AUTH_TOKEN=" "$HOME/.hermes/.env" | cut -d= -f2- | tr -d '"' | tr -d "'")
 fi
@@ -76,7 +83,7 @@ secrets = {
 }
 with open('$SECRETS_FILE', 'w') as f:
     json.dump(secrets, f)
-print(f"==> 已提取凭证（userId 尾号 {byname['userId'][-4:]}，deviceId 前缀 {byname['deviceId'][:3]}）")
+print('==> 已提取凭证（userId 尾号 %s，deviceId 前缀 %s）' % (byname['userId'][-4:], byname['deviceId'][:3]))
 "
 
 cd "$REPO_DIR"
