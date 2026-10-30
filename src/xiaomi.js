@@ -1091,6 +1091,58 @@ function healthQueryWindow(now, days) {
   };
 }
 
+async function resolveSeriesTarget(env, target, fetchImpl) {
+  if (target.target === "self") {
+    const token = await requireSelfToken(env, fetchImpl);
+    return {
+      kind: "self",
+      token,
+      identity: { target: "self", user_id: token.user_id || null },
+    };
+  }
+  const { token, relativeUid } = await requireRelative(
+    env,
+    target.relative_uid,
+    fetchImpl,
+  );
+  return {
+    kind: "relative",
+    token,
+    relativeUid,
+    identity: { target: "relative", relative_uid: relativeUid },
+  };
+}
+
+async function fetchSeriesWindow(seriesTarget, metric, start, end, fetchImpl, limit) {
+  if (seriesTarget.kind === "self") {
+    const items = await getSelfFitnessItems(
+      seriesTarget.token,
+      metric,
+      start,
+      end,
+      fetchImpl,
+    );
+    return compactSeries(items, metric, "self");
+  }
+
+  const response = await encryptedRequest(
+    fetchImpl,
+    seriesTarget.token,
+    "GET",
+    RELATIVES_AGGREGATED_PATH,
+    {
+      relative_uid: seriesTarget.relativeUid,
+      key: metric,
+      tag: "daily_report",
+      start_time: start,
+      end_time: end,
+      limit,
+    },
+  );
+  const items = responseResult(response).data_list;
+  return compactSeries(Array.isArray(items) ? items : [], metric, "relative");
+}
+
 export async function getHealthSeries(
   env,
   metric,
@@ -1100,60 +1152,105 @@ export async function getHealthSeries(
   now = Date.now(),
 ) {
   const { start, end } = healthQueryWindow(now, days);
-  if (target.target === "self") {
-    const token = await requireSelfToken(env, fetchImpl);
-    const items = await getSelfFitnessItems(
-      token,
-      metric,
-      start,
-      end,
-      fetchImpl,
-    );
-    const data = compactSeries(items, metric, "self").slice(-days);
-    return {
-      target: "self",
-      user_id: token.user_id || null,
-      metric,
-      days,
-      data,
-      message:
-        data.length === 0
-          ? "暂无数据（设备可能未佩戴或尚未同步）"
-          : undefined,
-    };
-  }
-
-  const { token, relativeUid } = await requireRelative(
-    env,
-    target.relative_uid,
+  const seriesTarget = await resolveSeriesTarget(env, target, fetchImpl);
+  const data = (await fetchSeriesWindow(
+    seriesTarget,
+    metric,
+    start,
+    end,
     fetchImpl,
-  );
-  const response = await encryptedRequest(
-    fetchImpl,
-    token,
-    "GET",
-    RELATIVES_AGGREGATED_PATH,
-    {
-      relative_uid: relativeUid,
-      key: metric,
-      tag: "daily_report",
-      start_time: start,
-      end_time: end,
-      limit: days,
-    },
-  );
-  const items = responseResult(response).data_list;
-  const data = compactSeries(Array.isArray(items) ? items : [], metric, "relative").slice(-days);
-
+    days,
+  )).slice(-days);
   return {
-    target: "relative",
-    relative_uid: relativeUid,
+    ...seriesTarget.identity,
     metric,
     days,
     data,
     message:
       data.length === 0
         ? "暂无数据（设备可能未佩戴或尚未同步）"
+        : undefined,
+  };
+}
+
+function splitDateSegments(startDate, endDate, maxSegmentDays = 30) {
+  const segments = [];
+  const endMs = Date.parse(`${endDate}T00:00:00Z`);
+  let cursorMs = Date.parse(`${startDate}T00:00:00Z`);
+  while (cursorMs <= endMs) {
+    const segmentEndMs = Math.min(endMs, cursorMs + (maxSegmentDays - 1) * 86_400_000);
+    segments.push({
+      start_date: new Date(cursorMs).toISOString().slice(0, 10),
+      end_date: new Date(segmentEndMs).toISOString().slice(0, 10),
+    });
+    cursorMs = segmentEndMs + 86_400_000;
+  }
+  return segments;
+}
+
+// 自定义日期范围历史查询：范围切成 ≤30 天分段逐段查询后按日期合并。
+// 每段窗口沿用 healthQueryWindow 的 CST 假设并加 ±18 小时时区余量；
+// 段间余量重叠会让相邻段看到边界日期的半天视图，只保留日期所属段的数据。
+export async function getHealthHistory(
+  env,
+  { metric, startDate, endDate, today },
+  target,
+  fetchImpl = fetch,
+) {
+  const segments = splitDateSegments(startDate, endDate);
+  const seriesTarget = await resolveSeriesTarget(env, target, fetchImpl);
+  const byDate = new Map();
+  for (const segment of segments) {
+    const segmentStartMs = Date.parse(`${segment.start_date}T00:00:00Z`);
+    const segmentEndMs = Date.parse(`${segment.end_date}T00:00:00Z`);
+    const start = segmentStartMs / 1000 - CST_OFFSET_SECONDS - MAX_TIMEZONE_OFFSET_SECONDS;
+    const end = (segmentEndMs + 86_400_000) / 1000
+      - CST_OFFSET_SECONDS
+      - 1
+      + MAX_TIMEZONE_OFFSET_SECONDS;
+    const segmentDays = Math.round((segmentEndMs - segmentStartMs) / 86_400_000) + 1;
+    const windowData = await fetchSeriesWindow(
+      seriesTarget,
+      metric,
+      start,
+      end,
+      fetchImpl,
+      segmentDays,
+    );
+    for (const record of windowData) {
+      if (record.date >= segment.start_date && record.date <= segment.end_date) {
+        byDate.set(record.date, record);
+      }
+    }
+  }
+  const data = [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date));
+  for (const record of data) {
+    if (record.date === today) record.partial_today = true;
+  }
+  const startMs = Date.parse(`${startDate}T00:00:00Z`);
+  const endMs = Date.parse(`${endDate}T00:00:00Z`);
+  const totalDays = Math.round((endMs - startMs) / 86_400_000) + 1;
+  const missing = [];
+  for (let ms = startMs; ms <= endMs; ms += 86_400_000) {
+    const date = new Date(ms).toISOString().slice(0, 10);
+    if (!byDate.has(date)) missing.push(date);
+  }
+  return {
+    ...seriesTarget.identity,
+    metric,
+    start_date: startDate,
+    end_date: endDate,
+    days_requested: totalDays,
+    days_returned: data.length,
+    data,
+    data_quality: {
+      missing_dates: missing.slice(0, 30),
+      ...(missing.length > 30 ? { missing_dates_count: missing.length } : {}),
+      coverage: Math.round(((totalDays - missing.length) / totalDays) * 100) / 100,
+    },
+    message:
+      data.length === 0
+        ? "范围内暂无数据（设备可能未佩戴或尚未同步）"
         : undefined,
   };
 }
