@@ -103,6 +103,7 @@ hermes cron edit <job-id> --add-skill mi-health
 - `health_workouts`：查询本人最近 1 至 30 天的运动 session 记录（单次运动摘要），仅透传上游提供的字段；暂不支持亲友。
 - `health_workout_analyze`：默认 28 天、最近 7 天窗口，分析本人运动 session 的次数、活跃天数、总时长和运动类型，并与此前同宽日历窗口比较；输出非诊断性参考，不构成训练建议。
 - `health_sleep_rhythm`：默认 14 天（1–30）窗口，分析主睡眠记录的入睡/起床环形中位数、时长中位数与 MAD、相邻日入睡偏移、工作日/周末分组和最近 7 天与基线的偏移；缺失日期不计为 0，排除小睡和可疑时长记录，不推断疾病、不输出恢复评分。
+- `health_history`：按自定义日期范围（`start_date`/`end_date`，含端点，本地日期）查询单项历史，`metric` 可选 sleep、heart_rate 或 steps，最多 366 天；内部切成 ≤30 天分段查询后按日期合并，返回 `data_quality.missing_dates` 与 `coverage`。今天的数据标记 `partial_today`，可选 `timezone` 默认 Asia/Shanghai。
 
 查询本人时省略 `target` 或显式传入 `{"target":"self"}`。查询亲友时必须传入：
 
@@ -142,6 +143,8 @@ hermes cron edit <job-id> --add-skill mi-health
 仅供登录你自己的小米账号、查询你已获授权的亲友数据。请勿用于任何侵犯他人隐私或违反小米用户协议的用途。
 
 本人数据使用 `POST /app/v1/data/get_fitness_data_by_time`。中国区查询窗口前后各扩展 18 小时，再按记录的 `zone_offset` 归入日期；缺少 `zone_offset` 时回退到 UTC+8。本人 steps 记录按接口的增量语义逐日汇总；本人 heart 采样点转换为每日统计；sleep 同日优先保留非小睡、持续时间更长、更新时间更新的记录。亲友数据使用 `/app/v1/relatives/*` 的 `daily_report`，同日记录不重复求和。
+
+超过 30 天的查询（`health_history`）依赖上游接口实际可用性；上游若截断返回，结果会在 `data_quality.missing_dates` 和 `coverage` 中反映，不会静默补零。
 
 MCP 返回使用字段白名单，不返回 `AUTH_TOKEN`、`passToken`、`cUserId`、`serviceToken`、`ssecurity` 或 Cookie。请勿提交 `.dev.vars`、`.env`、`wrangler.toml` 或 `.wrangler/`。
 
