@@ -238,6 +238,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_steps",
       "health_workouts",
       "health_workout_analyze",
+      "health_sleep_rhythm",
       "health_auth_status",
       "health_me",
       "health_relatives",
@@ -700,6 +701,76 @@ test("health_workouts returns whitelisted workout sessions for self only", async
   });
   assert.equal(relative.json.result.isError, true);
   assert.match(relative.json.result.content[0].text, /不支持参数/);
+});
+
+test("health_sleep_rhythm validates arguments and reports rhythm over sleep records", async () => {
+  const worker = createWorker({ fetchImpl: async () => assert.fail("no network") });
+  const env = envWithKv();
+  const cases = [
+    [{ days: 0 }, /days 必须是 1 到 30 的整数/],
+    [{ days: 31 }, /days 必须是 1 到 30 的整数/],
+    [{ days: 2.5 }, /days 必须是 1 到 30 的整数/],
+    [{ timezone: "Mars/Olympus" }, /IANA 时区/],
+    [{ target: "relative" }, /relative_uid/],
+  ];
+
+  for (const [args, expected] of cases) {
+    const result = await callMcp(worker, env, {
+      jsonrpc: "2.0",
+      id: `sleep-rhythm-${JSON.stringify(args)}`,
+      method: "tools/call",
+      params: { name: "health_sleep_rhythm", arguments: args },
+    });
+    assert.equal(result.json.result.isError, true, JSON.stringify(args));
+    assert.match(result.json.result.content[0].text, expected, JSON.stringify(args));
+  }
+
+  const kv = new MemoryKv({ [TOKEN_KEY]: JSON.stringify(tokenRecord()) });
+  const now = new Date();
+  const daysAgo = (offset) =>
+    new Date(now.getTime() - offset * 86400 * 1000).toISOString().slice(0, 10);
+  // 14 个 wake 日期（今天往回推 13 天），每晚 23:30 入睡、07:00 起床、450 分钟。
+  const fetchImpl = encryptedApiMock({
+    "/app/v1/data/get_fitness_data_by_time": (url, options, params) => {
+      assert.equal(params.key, "sleep");
+      const data_list = [];
+      for (let offset = 0; offset <= 13; offset += 1) {
+        const wakeMs = Date.parse(`${daysAgo(offset)}T07:00:00Z`);
+        data_list.push({
+          time: wakeMs / 1000 - 60,
+          zone_offset: 0,
+          value: JSON.stringify({
+            bedtime: wakeMs / 1000 - 450 * 60,
+            wake_up_time: wakeMs / 1000,
+            total_duration: 450,
+            is_nap: false,
+          }),
+        });
+      }
+      return { code: 0, result: { data_list, has_more: false } };
+    },
+  });
+  const authedWorker = createWorker({ fetchImpl });
+  const result = await callMcp(authedWorker, envWithKv(kv), {
+    jsonrpc: "2.0",
+    id: "sleep-rhythm",
+    method: "tools/call",
+    params: {
+      name: "health_sleep_rhythm",
+      arguments: { days: 14, timezone: "UTC" },
+    },
+  });
+  const text = result.json.result.content[0].text;
+  const value = JSON.parse(text);
+
+  assert.equal(value.target, "self");
+  assert.equal(value.user_id, "account-user");
+  assert.equal(value.period.current_date, daysAgo(0));
+  assert.equal(value.period.days, 14);
+  assert.equal(value.data_quality.valid_records, 14);
+  assert.equal(value.schedule.bedtime.median, "23:30");
+  assert.equal(value.schedule.duration.median_minutes, 450);
+  assert.doesNotMatch(text, /service-token-secret|passToken|ssecurity/);
 });
 
 test("health_workout_analyze validates arguments and stays self-only", async () => {
