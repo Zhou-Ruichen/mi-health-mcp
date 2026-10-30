@@ -92,7 +92,7 @@ hermes cron edit <job-id> --add-skill mi-health
 ### MCP tools
 
 - `health_me`：返回当前登录状态和 `user_id`，不返回凭证。
-- `health_login_status`：返回当前健康 API session 是否可用及登录方式，不返回凭证。
+- `health_login_status`：返回当前健康 API session 状态（`session_state`：`verified` 为最近 24 小时内经过真实上游验证，`cached` 为仅缓存未验证，`expired`/`missing` 为不可用），不返回凭证。
 - `health_login_refresh`：使用小米账号 Secret 强制刷新 session，失败时保留现有缓存会话。
 - `health_relatives`：列出可查询亲友的 `relative_uid` 和备注。
 - `health_latest`：查询最新的睡眠、心率和步数摘要。

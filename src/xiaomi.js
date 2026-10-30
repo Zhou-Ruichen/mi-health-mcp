@@ -33,6 +33,7 @@ const LOGIN_USER_AGENT =
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const REQUEST_DEADLINE_MS = 30_000;
+const VERIFIED_WINDOW_MS = 24 * 60 * 60 * 1000;
 const CST_OFFSET_SECONDS = 8 * 60 * 60;
 const MAX_TIMEZONE_OFFSET_SECONDS = 18 * 60 * 60;
 
@@ -234,6 +235,12 @@ export async function markTokenExpired(env, reason) {
   });
 }
 
+export async function markTokenVerified(env, now = Date.now()) {
+  const token = await loadToken(env);
+  if (!token?.service_token) return;
+  await saveToken(env, { ...token, last_verified_at: new Date(now).toISOString() });
+}
+
 export async function getAuthStatus(env) {
   const token = await loadToken(env);
   if (!token) {
@@ -269,11 +276,18 @@ export async function getAuthStatus(env) {
 export async function getLoginStatus(env, fetchImpl = fetch) {
   const token = await loadToken(env);
   if (token?.service_token && token?.ssecurity && token.auth_state !== "expired") {
+    // 缓存命中保持只读，不主动访问上游；verified 仅依据最近一次真实上游成功时间。
+    const lastVerifiedAt = token.last_verified_at || null;
+    const fresh = lastVerifiedAt !== null &&
+      Date.now() - Date.parse(lastVerifiedAt) < VERIFIED_WINDOW_MS;
     return {
       logged_in: true,
       method: token.auth_method || "qr",
       user_id: token.user_id || null,
+      session_state: fresh ? "verified" : "cached",
       session_valid: true,
+      last_verified_at: lastVerifiedAt,
+      updated_at: token.updated_at || null,
     };
   }
   if (!hasPassTokenConfiguration(env)) {
@@ -281,7 +295,10 @@ export async function getLoginStatus(env, fetchImpl = fetch) {
       logged_in: false,
       method: null,
       user_id: token?.user_id || null,
+      session_state: token?.auth_state === "expired" ? "expired" : "missing",
       session_valid: false,
+      last_verified_at: token?.last_verified_at || null,
+      updated_at: token?.updated_at || null,
       message: "未配置 XIAOMI_USER_ID/XIAOMI_PASS_TOKEN；二维码登录仅为兼容，可能收到 Xiaomi 70036",
     };
   }
@@ -291,14 +308,20 @@ export async function getLoginStatus(env, fetchImpl = fetch) {
       logged_in: true,
       method: "pass_token",
       user_id: refreshed.user_id,
+      session_state: "verified",
       session_valid: true,
+      last_verified_at: refreshed.last_verified_at,
+      updated_at: refreshed.updated_at,
     };
   } catch (error) {
     return {
       logged_in: false,
       method: "pass_token",
       user_id: null,
+      session_state: token?.auth_state === "expired" ? "expired" : "missing",
       session_valid: false,
+      last_verified_at: token?.last_verified_at || null,
+      updated_at: token?.updated_at || null,
       message: String(error?.message || "miothealth session 获取失败"),
     };
   }
@@ -468,6 +491,7 @@ async function exchangePassTokenSessionInner(
     auth_method: "pass_token",
     auth_state: "valid",
     updated_at: updatedAt,
+    last_verified_at: updatedAt,
     last_checked_at: null,
     last_error: null,
   };
@@ -1385,6 +1409,7 @@ async function pollQrLoginInner(env, fetchImpl, now) {
     auth_method: "qr",
     auth_state: "valid",
     updated_at: updatedAt,
+    last_verified_at: updatedAt,
     last_checked_at: null,
     last_error: null,
   };

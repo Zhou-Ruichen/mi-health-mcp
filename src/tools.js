@@ -10,6 +10,7 @@ import {
   getWorkouts,
   hasPassTokenConfiguration,
   markTokenExpired,
+  markTokenVerified,
   pollQrLogin,
   exchangePassTokenSession,
   startQrLogin,
@@ -410,7 +411,9 @@ async function getWorkoutAnalysis(env, args, fetchImpl) {
 
 async function withAuthTracking(env, fetchImpl, operation) {
   try {
-    return await operation();
+    const result = await operation();
+    await markTokenVerified(env);
+    return result;
   } catch (error) {
     if (error?.authExpired) {
       await markTokenExpired(env, error.message);
