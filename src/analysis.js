@@ -166,11 +166,12 @@ export function validateOptions(options) {
   const currentDate = options?.currentDate;
   const days = options?.days === undefined ? 30 : options.days;
   const recentDays = options?.recentDays === undefined ? 7 : options.recentDays;
+  const maxDays = options?.maxDays ?? 30;
   if (!isUtcCalendarDate(currentDate)) {
     throw new TypeError("currentDate must be a real YYYY-MM-DD UTC calendar date");
   }
-  if (!Number.isInteger(days) || days < 8 || days > 30) {
-    throw new RangeError("days must be an integer from 8 through 30");
+  if (!Number.isInteger(days) || days < 8 || days > maxDays) {
+    throw new RangeError(`days must be an integer from 8 through ${maxDays}`);
   }
   if (!Number.isInteger(recentDays) || recentDays < 3 || recentDays > 14) {
     throw new RangeError("recentDays must be an integer from 3 through 14");

@@ -1,6 +1,7 @@
 import { analyzeHealthSeries } from "./analysis.js";
 import { analyzeSleepRhythm } from "./sleepRhythm.js";
 import { analyzeWorkoutSessions } from "./workoutAnalysis.js";
+import { buildWeeklyBrief } from "./weeklyBrief.js";
 import {
   getAuthStatus,
   getHealthMe,
@@ -179,6 +180,33 @@ const workoutAnalysisSchema = {
   additionalProperties: false,
 };
 
+const weeklyBriefSchema = {
+  type: "object",
+  properties: {
+    days: {
+      type: "integer",
+      minimum: 8,
+      maximum: 42,
+      default: 28,
+      description: "基线窗口天数，默认 28，范围 8 到 42。",
+    },
+    recent_days: {
+      type: "integer",
+      minimum: 3,
+      maximum: 14,
+      default: 7,
+      description: "近期窗口宽度（天），默认 7；必须小于 days。",
+    },
+    include_workouts: {
+      type: "boolean",
+      default: true,
+      description: "是否纳入运动 session 分析，默认 true。",
+    },
+    timezone: timezoneProperty,
+  },
+  additionalProperties: false,
+};
+
 export const TOOLS = [
   {
     name: "health_latest",
@@ -225,6 +253,12 @@ export const TOOLS = [
     description:
       "按自定义日期范围（start_date 到 end_date，含端点，本地日期）查询单项历史：metric 选 sleep、heart_rate 或 steps，突破 30 天限制，最多 366 天。未来日期截断到今天；今天的数据标记 partial_today。返回缺失日期和覆盖率。超过 30 天的查询依赖上游接口实际可用性。",
     inputSchema: historySchema,
+  },
+  {
+    name: "health_weekly_brief",
+    description:
+      "一次调用返回综合健康周报：睡眠、心率、步数与运动 session 的近期窗口与个人基线比较，附可核实变化（observations）、原始数值（evidence）、数据质量和局限说明。结果仅供非诊断性参考，不做因果推断，不推断疾病，不输出恢复评分。仅支持本人。",
+    inputSchema: weeklyBriefSchema,
   },
   {
     name: "health_auth_status",
@@ -328,6 +362,7 @@ function validateToolArguments(name, args) {
   if (name === "health_workout_analyze") parseAnalysisArgs(args, 28);
   if (name === "health_sleep_rhythm") parseSleepRhythmArgs(args);
   if (name === "health_history") parseHistoryArgs(args);
+  if (name === "health_weekly_brief") parseWeeklyBriefArgs(args);
 }
 
 const HISTORY_MAX_DAYS = 366;
@@ -427,6 +462,29 @@ function parseAnalysisArgs(args, defaultDays = 30) {
   return { days, recentDays, timezone };
 }
 
+function parseWeeklyBriefArgs(args) {
+  const days = args.days === undefined ? 28 : args.days;
+  const recentDays = args.recent_days === undefined ? 7 : args.recent_days;
+  const timezone = args.timezone === undefined ? "UTC" : args.timezone;
+  if (!Number.isInteger(days) || days < 8 || days > 42) {
+    throw new ToolValidationError("days 必须是 8 到 42 的整数");
+  }
+  if (!Number.isInteger(recentDays) || recentDays < 3 || recentDays > 14) {
+    throw new ToolValidationError("recent_days 必须是 3 到 14 的整数");
+  }
+  if (recentDays >= days) {
+    throw new ToolValidationError("recent_days 必须小于 days");
+  }
+  if (args.include_workouts !== undefined && typeof args.include_workouts !== "boolean") {
+    throw new ToolValidationError("include_workouts 必须是布尔值");
+  }
+  if (typeof timezone !== "string" || timezone.length < 1 || timezone.length > 64) {
+    throw new ToolValidationError("timezone 必须是 1 到 64 个字符的 IANA 时区");
+  }
+  currentDateInTimezone(timezone);
+  return { days, recentDays, timezone, includeWorkouts: args.include_workouts !== false };
+}
+
 function parseSleepRhythmArgs(args) {
   const days = args.days === undefined ? 14 : args.days;
   const timezone = args.timezone === undefined ? "UTC" : args.timezone;
@@ -463,32 +521,36 @@ function parseTarget(args) {
   return { target, relative_uid: normalizedUid };
 }
 
-async function getHealthAnalysis(env, args, fetchImpl) {
-  const target = parseTarget(args);
-  const { days, recentDays, timezone } = parseAnalysisArgs(args);
-  const now = Date.now();
+async function fetchHealthSeriesBundle(env, days, target, fetchImpl, now) {
   const [steps, sleep, heartRate] = await Promise.all([
     getHealthSeries(env, "steps", days, target, fetchImpl, now),
     getHealthSeries(env, "sleep", days, target, fetchImpl, now),
     getHealthSeries(env, "heart_rate", days, target, fetchImpl, now),
   ]);
-  const currentDate = currentDateInTimezone(timezone, now);
-  const analysis = analyzeHealthSeries(
-    {
+  return {
+    identity: target.target === "self"
+      ? { target: "self", user_id: steps.user_id || null }
+      : { target: "relative", relative_uid: steps.relative_uid },
+    series: {
       steps: steps.data,
       sleep: sleep.data,
       heart_rate: heartRate.data,
     },
-    {
-      currentDate,
-      days,
-      recentDays,
-      nowSeconds: Math.floor(now / 1000),
-    },
-  );
-  const identity = target.target === "self"
-    ? { target: "self", user_id: steps.user_id || null }
-    : { target: "relative", relative_uid: steps.relative_uid };
+  };
+}
+
+async function getHealthAnalysis(env, args, fetchImpl) {
+  const target = parseTarget(args);
+  const { days, recentDays, timezone } = parseAnalysisArgs(args);
+  const now = Date.now();
+  const { identity, series } = await fetchHealthSeriesBundle(env, days, target, fetchImpl, now);
+  const currentDate = currentDateInTimezone(timezone, now);
+  const analysis = analyzeHealthSeries(series, {
+    currentDate,
+    days,
+    recentDays,
+    nowSeconds: Math.floor(now / 1000),
+  });
   return {
     ...identity,
     period: {
@@ -569,6 +631,36 @@ async function getWorkoutAnalysis(env, args, fetchImpl) {
   };
 }
 
+async function getWeeklyBrief(env, args, fetchImpl) {
+  const { days, recentDays, timezone, includeWorkouts } = parseWeeklyBriefArgs(args);
+  const now = Date.now();
+  const { identity, series } = await fetchHealthSeriesBundle(env, days, { target: "self" }, fetchImpl, now);
+  let workouts = [];
+  if (includeWorkouts) {
+    workouts = (await getWorkouts(env, days, fetchImpl, now)).data;
+  }
+  const currentDate = currentDateInTimezone(timezone, now);
+  const brief = buildWeeklyBrief(
+    { ...series, workouts },
+    {
+      currentDate,
+      days,
+      recentDays,
+      includeWorkouts,
+      nowSeconds: Math.floor(now / 1000),
+    },
+  );
+  return {
+    target: "self",
+    user_id: identity.user_id,
+    ...brief,
+    caveats: [
+      "综合周报由各指标的独立分析器汇总，比较基于本人历史窗口中位数，仅供非诊断性参考。",
+      "只描述可核实的同期变化，不做因果推断，不推断疾病，不输出恢复评分。",
+    ],
+  };
+}
+
 async function withAuthTracking(env, fetchImpl, operation) {
   try {
     const result = await operation();
@@ -627,6 +719,10 @@ export async function callTool(
     case "health_sleep_rhythm":
       return withAuthTracking(env, fetchImpl, () =>
         getSleepRhythmAnalysis(env, args, fetchImpl),
+      );
+    case "health_weekly_brief":
+      return withAuthTracking(env, fetchImpl, () =>
+        getWeeklyBrief(env, args, fetchImpl),
       );
     case "health_history": {
       const historyArgs = parseHistoryArgs(args);

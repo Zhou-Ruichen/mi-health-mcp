@@ -240,6 +240,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_workout_analyze",
       "health_sleep_rhythm",
       "health_history",
+      "health_weekly_brief",
       "health_auth_status",
       "health_me",
       "health_relatives",

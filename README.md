@@ -103,6 +103,7 @@ hermes cron edit <job-id> --add-skill mi-health
 - `health_workouts`：查询本人最近 1 至 30 天的运动 session 记录（单次运动摘要），仅透传上游提供的字段；暂不支持亲友。
 - `health_workout_analyze`：默认 28 天、最近 7 天窗口，分析本人运动 session 的次数、活跃天数、总时长和运动类型，并与此前同宽日历窗口比较；输出非诊断性参考，不构成训练建议。
 - `health_sleep_rhythm`：默认 14 天（1–30）窗口，分析主睡眠记录的入睡/起床环形中位数、时长中位数与 MAD、相邻日入睡偏移、工作日/周末分组和最近 7 天与基线的偏移；缺失日期不计为 0，排除小睡和可疑时长记录，不推断疾病、不输出恢复评分。
+- `health_weekly_brief`：一次调用返回综合周报：睡眠、心率、步数（各产出一份 `analyzeHealthSeries` 基线比较）与运动 session（`include_workouts` 可关）的近期/基线中位数对比，附睡眠钟点环形统计偏移、可核实的 observations、evidence 原始数值、数据质量和 limitations；不做因果推断，不推断疾病，不输出恢复评分。默认 28 天基线、近 7 天窗口，`days` 范围 8–42，仅支持本人。
 - `health_history`：按自定义日期范围（`start_date`/`end_date`，含端点，本地日期）查询单项历史，`metric` 可选 sleep、heart_rate 或 steps，最多 366 天；内部切成 ≤30 天分段查询后按日期合并，返回 `data_quality.missing_dates` 与 `coverage`。今天的数据标记 `partial_today`，可选 `timezone` 默认 Asia/Shanghai。
 
 查询本人时省略 `target` 或显式传入 `{"target":"self"}`。查询亲友时必须传入：
@@ -129,6 +130,10 @@ hermes cron edit <job-id> --add-skill mi-health
 `health_analyze` 不重算健康 API 已返回的日期；`timezone` 只用于识别当前自然日，把当日步数、距离、calories 和每日心率标为 `partial` 并排除在完整日基线之外。睡眠按起床日期视为已完成记录。同一日期存在重复摘要时，分析器会先按有效测量、采样或睡眠阶段完整性、记录时间和稳定键确定性地选择一条。`recent_days` 表示最近的自然日窗口；缺失或因质量不足被排除的日期不会由更早记录补位。距离和 calories 与步数使用同一套个人基线方法（recent、baseline、comparison、mean、median、min、max、q1、q3、mad），对本人和亲友数据一致。结果先返回 `data_quality`：`missing_dates` 表示当天记录缺失，`missing_measurements` 表示记录存在但目标数值为空、非数值或负数（现覆盖 steps、sleep_duration、heart_rate、distance、calories）；两者均按未知处理而不是按 0 处理。结果还会报告最新数据同步延迟、睡眠阶段完整率和心率采样质量。低于完整日采样数中位数 50% 的日期列入 `low_sample_dates`，缺少有效采样数的日期列入 `unknown_sample_dates`；两者都不进入心率趋势。趋势比较使用未舍入的 median、MAD、IQR 和 robust z-score，输出时才舍入；样本不足时返回 `insufficient_data`，不会硬给趋势结论。所有比较均为个人历史摘要，不能用于疾病诊断或用药建议。
 
 每条睡眠记录带有 `sleep_stage_status`：`available` 表示至少一个 deep/light/REM 阶段时长大于 0；`unavailable` 表示总睡眠时长有效但阶段字段全为 0 或缺失；`unknown` 表示没有有效的总睡眠时长，无法判断阶段明细是否可用。总睡眠时长有效但阶段字段全为 0 时，表示睡眠阶段明细不可用，不表示深睡或浅睡实际为零。MCP 不返回记录设备来源：2026 年 8 月对 25 条原始 sleep 记录（13 个 wake 日期，含手机与手环记录日）的核实显示，上游没有可用的 source/device_type 字段，阶段完整性和心率字段也不能识别设备。健康摘要默认不讨论来源；仅在用户询问来源，或用户已明确说明该 wake 日期未佩戴手环、由手机记录时，才把它作为用户提供的背景说明，不能表述为 MCP 检测结果。
+
+### 综合健康周报（health_weekly_brief）
+
+`health_weekly_brief` 只做一次有界的取数（`days` 窗口的 sleep/heart_rate/steps 序列，`include_workouts=true` 时加一次运动记录查询），复用 `health_analyze` 的取数与分析路径：睡眠、心率、步数各产出一份 robust 基线比较；睡眠钟点复用 `health_sleep_rhythm` 的环形统计，报告近 7 天入睡/起床钟点相对基线的偏移。输出分四层：`summary`（每个指标 2–4 行结论性字段）、`observations`（只陈述同向可核实的变化与数值，如“步数中位数高于基线 robust z=2.3”）、`evidence`（recent/baseline 中位数、n、robust z 原始数值）、`data_quality`（有效天数、缺失、同步延迟）。某指标有效数据不足 3 天时该指标没有 observation，只在 `limitations` 说明。比较基于个人历史窗口中位数，不做因果推断，不推断疾病，不输出恢复评分。
 
 ### 运动 session 记录（health_workouts）
 
