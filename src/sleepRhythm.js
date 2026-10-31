@@ -115,11 +115,12 @@ function groupStats(records) {
 function validateSleepOptions(options) {
   const currentDate = options?.currentDate;
   const days = options?.days === undefined ? 14 : options.days;
+  const maxDays = options?.maxDays ?? 30;
   if (!isUtcCalendarDate(currentDate)) {
     throw new TypeError("currentDate must be a real YYYY-MM-DD UTC calendar date");
   }
-  if (!Number.isInteger(days) || days < 1 || days > 30) {
-    throw new RangeError("days must be an integer from 1 through 30");
+  if (!Number.isInteger(days) || days < 1 || days > maxDays) {
+    throw new RangeError(`days must be an integer from 1 through ${maxDays}`);
   }
   return { currentDate, days };
 }

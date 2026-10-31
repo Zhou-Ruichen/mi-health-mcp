@@ -50,6 +50,9 @@ alert.
 - `health_analyze`: preferred for “分析”, “趋势”, “最近怎么样”, “和平时相比”,
   weekly reviews, or any request requiring interpretation rather than a raw
   value. It computes deterministic personal-baseline statistics.
+- `health_weekly_brief`: preferred for “给我一份这周的健康总结” style requests
+  that want sleep, heart rate, steps, and workouts in one call. One bounded
+  fetch; comparisons stay non-diagnostic with no causal wording.
 - `health_latest`: latest compact overview of steps, sleep, and heart rate.
 - `health_steps`: daily step totals for 1 to 30 days.
 - `health_workouts`: workout sessions (self only) for 1 to 30 days; per-session
