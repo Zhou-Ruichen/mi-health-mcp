@@ -4,6 +4,7 @@ import { analyzeWorkoutSessions } from "./workoutAnalysis.js";
 import {
   getAuthStatus,
   getHealthMe,
+  getHealthHistory,
   getHealthSeries,
   getLoginStatus,
   getLatestHealth,
@@ -125,6 +126,37 @@ const sleepRhythmSchema = {
   additionalProperties: false,
 };
 
+const historySchema = {
+  type: "object",
+  properties: {
+    ...targetProperties,
+    metric: {
+      type: "string",
+      enum: ["sleep", "heart_rate", "steps"],
+      description: "历史查询的单项指标。",
+    },
+    start_date: {
+      type: "string",
+      pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      description: "起始日期（含端点，本地日期），YYYY-MM-DD。",
+    },
+    end_date: {
+      type: "string",
+      pattern: "^\\d{4}-\\d{2}-\\d{2}$",
+      description: "结束日期（含端点，本地日期），YYYY-MM-DD；未来日期截断到今天。",
+    },
+    timezone: {
+      type: "string",
+      minLength: 1,
+      maxLength: 64,
+      default: "Asia/Shanghai",
+      description: "用于判定“今天”的 IANA 时区；默认 Asia/Shanghai，与查询窗口的 CST 假设一致。",
+    },
+  },
+  required: ["metric", "start_date", "end_date"],
+  additionalProperties: false,
+};
+
 const workoutAnalysisSchema = {
   type: "object",
   properties: {
@@ -187,6 +219,12 @@ export const TOOLS = [
     name: "health_sleep_rhythm",
     description: "基于最近窗口的主睡眠记录分析睡眠规律：入睡/起床的环形中位数、时长中位数与 MAD、相邻日入睡偏移、工作日/周末分组和最近 7 天与基线的偏移。结果仅供非诊断性参考。",
     inputSchema: sleepRhythmSchema,
+  },
+  {
+    name: "health_history",
+    description:
+      "按自定义日期范围（start_date 到 end_date，含端点，本地日期）查询单项历史：metric 选 sleep、heart_rate 或 steps，突破 30 天限制，最多 366 天。未来日期截断到今天；今天的数据标记 partial_today。返回缺失日期和覆盖率。超过 30 天的查询依赖上游接口实际可用性。",
+    inputSchema: historySchema,
   },
   {
     name: "health_auth_status",
@@ -289,6 +327,58 @@ function validateToolArguments(name, args) {
   if (name === "health_analyze") parseAnalysisArgs(args);
   if (name === "health_workout_analyze") parseAnalysisArgs(args, 28);
   if (name === "health_sleep_rhythm") parseSleepRhythmArgs(args);
+  if (name === "health_history") parseHistoryArgs(args);
+}
+
+const HISTORY_MAX_DAYS = 366;
+
+function isValidDateString(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const ms = Date.parse(`${value}T00:00:00Z`);
+  if (!Number.isFinite(ms)) return false;
+  return new Date(ms).toISOString().slice(0, 10) === value;
+}
+
+function parseHistoryArgs(args) {
+  const metric = args.metric;
+  assertToolValidation(
+    metric === "sleep" || metric === "heart_rate" || metric === "steps",
+    "metric 必须是 sleep、heart_rate 或 steps",
+  );
+  for (const field of ["start_date", "end_date"]) {
+    assertToolValidation(
+      isValidDateString(args[field]),
+      `${field} 必须是有效的 YYYY-MM-DD 日期，例如 2026-01-31`,
+    );
+  }
+  const timezone = args.timezone === undefined ? "Asia/Shanghai" : args.timezone;
+  if (typeof timezone !== "string" || timezone.length < 1 || timezone.length > 64) {
+    throw new ToolValidationError("timezone 必须是 1 到 64 个字符的 IANA 时区");
+  }
+  // 未来日期截断到今天，再校验范围，因此“从过去某天到远期未来”合法。
+  const today = currentDateInTimezone(timezone);
+  if (args.start_date > args.end_date) {
+    throw new ToolValidationError("start_date 必须不晚于 end_date");
+  }
+  if (args.start_date > today) {
+    throw new ToolValidationError(`start_date 不能晚于今天（${today}）`);
+  }
+  const endDate = args.end_date > today ? today : args.end_date;
+  const days =
+    (Date.parse(`${endDate}T00:00:00Z`) -
+      Date.parse(`${args.start_date}T00:00:00Z`)) /
+      86_400_000 +
+    1;
+  assertToolValidation(
+    days <= HISTORY_MAX_DAYS,
+    `日期范围最多 ${HISTORY_MAX_DAYS} 天（含端点）`,
+  );
+  return {
+    metric,
+    startDate: args.start_date,
+    endDate,
+    today,
+  };
 }
 
 function parseDays(args) {
@@ -538,6 +628,13 @@ export async function callTool(
       return withAuthTracking(env, fetchImpl, () =>
         getSleepRhythmAnalysis(env, args, fetchImpl),
       );
+    case "health_history": {
+      const historyArgs = parseHistoryArgs(args);
+      const historyTarget = parseTarget(args);
+      return withAuthTracking(env, fetchImpl, () =>
+        getHealthHistory(env, historyArgs, historyTarget, fetchImpl),
+      );
+    }
     case "health_auth_status":
       return getAuthStatus(env);
     case "health_me":

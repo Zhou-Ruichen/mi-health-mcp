@@ -239,6 +239,7 @@ test("initialize, tools/list, and initialized notification follow JSON-RPC", asy
       "health_workouts",
       "health_workout_analyze",
       "health_sleep_rhythm",
+      "health_history",
       "health_auth_status",
       "health_me",
       "health_relatives",
@@ -267,6 +268,13 @@ test("MCP enforces each tool argument contract before dispatch", async () => {
     ["health_steps", { days: 7, unexpected: true }, /unexpected|参数|argument/i],
     ["health_analyze", { days: 8, recent_days: 2, timezone: "UTC" }, /recent_days|3 到 14/i],
     ["health_analyze", { days: 8, recent_days: 3, timezone: "UTC", unexpected: true }, /unexpected|参数|argument/i],
+    ["health_history", { metric: "weight", start_date: "2026-01-01", end_date: "2026-01-31" }, /metric 必须是/],
+    ["health_history", { metric: "sleep", start_date: "2026-1-1", end_date: "2026-01-31" }, /start_date 必须是/],
+    ["health_history", { metric: "sleep", start_date: "2026-02-30", end_date: "2026-03-05" }, /start_date 必须是/],
+    ["health_history", { metric: "sleep", start_date: "2026-03-10", end_date: "2026-03-01" }, /start_date 必须不晚于/],
+    ["health_history", { metric: "sleep", start_date: "2025-01-01", end_date: "2026-01-02" }, /最多 366 天/],
+    ["health_history", { metric: "sleep", start_date: "2295-01-01", end_date: "2295-01-31" }, /不能晚于今天/],
+    ["health_history", { metric: "sleep", start_date: "2026-01-01", end_date: "2026-01-31", timezone: "Mars/Olympus" }, /IANA 时区/],
   ];
 
   for (const [name, args, expected] of cases) {
