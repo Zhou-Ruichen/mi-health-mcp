@@ -1,4 +1,5 @@
 import { analyzeHealthSeries } from "./analysis.js";
+import { analyzeSleepRhythm } from "./sleepRhythm.js";
 import { analyzeWorkoutSessions } from "./workoutAnalysis.js";
 import {
   getAuthStatus,
@@ -108,6 +109,22 @@ const analysisSchema = {
   additionalProperties: false,
 };
 
+const sleepRhythmSchema = {
+  type: "object",
+  properties: {
+    ...targetProperties,
+    days: {
+      type: "integer",
+      minimum: 1,
+      maximum: 30,
+      default: 14,
+      description: "分析窗口天数，默认 14，范围 1 到 30。",
+    },
+    timezone: timezoneProperty,
+  },
+  additionalProperties: false,
+};
+
 const workoutAnalysisSchema = {
   type: "object",
   properties: {
@@ -165,6 +182,11 @@ export const TOOLS = [
     name: "health_workout_analyze",
     description: "基于个人历史分析本人运动 session：最近窗口的次数、活跃天数、总时长和运动类型，以及与此前同宽日历窗口的比较。默认 28 天、最近 7 天窗口。结果仅供非诊断性参考，不构成训练建议。仅支持本人。",
     inputSchema: workoutAnalysisSchema,
+  },
+  {
+    name: "health_sleep_rhythm",
+    description: "基于最近窗口的主睡眠记录分析睡眠规律：入睡/起床的环形中位数、时长中位数与 MAD、相邻日入睡偏移、工作日/周末分组和最近 7 天与基线的偏移。结果仅供非诊断性参考。",
+    inputSchema: sleepRhythmSchema,
   },
   {
     name: "health_auth_status",
@@ -266,6 +288,7 @@ function validateToolArguments(name, args) {
   }
   if (name === "health_analyze") parseAnalysisArgs(args);
   if (name === "health_workout_analyze") parseAnalysisArgs(args, 28);
+  if (name === "health_sleep_rhythm") parseSleepRhythmArgs(args);
 }
 
 function parseDays(args) {
@@ -312,6 +335,19 @@ function parseAnalysisArgs(args, defaultDays = 30) {
   }
   currentDateInTimezone(timezone);
   return { days, recentDays, timezone };
+}
+
+function parseSleepRhythmArgs(args) {
+  const days = args.days === undefined ? 14 : args.days;
+  const timezone = args.timezone === undefined ? "UTC" : args.timezone;
+  if (!Number.isInteger(days) || days < 1 || days > 30) {
+    throw new ToolValidationError("days 必须是 1 到 30 的整数");
+  }
+  if (typeof timezone !== "string" || timezone.length < 1 || timezone.length > 64) {
+    throw new ToolValidationError("timezone 必须是 1 到 64 个字符的 IANA 时区");
+  }
+  currentDateInTimezone(timezone);
+  return { days, timezone };
 }
 
 function parseTarget(args) {
@@ -376,6 +412,40 @@ async function getHealthAnalysis(env, args, fetchImpl) {
       "当前日步数、距离、calories 和每日心率仅作为部分日展示，不进入完整日基线。",
       "总睡眠时长有效但阶段字段全为 0 时，表示睡眠阶段明细不可用，不表示深睡或浅睡实际为零。",
       "结果基于个人历史摘要，仅供非诊断性趋势参考。",
+    ],
+  };
+}
+
+async function getSleepRhythmAnalysis(env, args, fetchImpl) {
+  const target = parseTarget(args);
+  const { days, timezone } = parseSleepRhythmArgs(args);
+  const now = Date.now();
+  const sleep = await getHealthSeries(env, "sleep", days, target, fetchImpl, now);
+  const currentDate = currentDateInTimezone(timezone, now);
+  const sleepMinutes = sleep.data.map((record) => ({
+    date: record.date,
+    bedtime: typeof record.bedtime === "number" ? record.bedtime / 60 : undefined,
+    wake_up_time: typeof record.wake_up_time === "number" ? record.wake_up_time / 60 : undefined,
+    total_duration: record.total_duration,
+    is_nap: record.is_nap === true,
+  }));
+  const identity = target.target === "self"
+    ? { target: "self", user_id: sleep.user_id || null }
+    : { target: "relative", relative_uid: sleep.relative_uid };
+  return {
+    ...identity,
+    period: {
+      current_date: currentDate,
+      days,
+      timezone,
+    },
+    ...analyzeSleepRhythm(sleepMinutes, {
+      currentDate,
+      days,
+    }),
+    caveats: [
+      "入睡和起床时刻取自记录时间戳的钟表时刻，未做时区或夏令时校正；跨时区旅行期间结果不可靠。",
+      "结果基于个人历史摘要，仅供非诊断性参考；不推断疾病，不输出恢复评分。",
     ],
   };
 }
@@ -463,6 +533,10 @@ export async function callTool(
     case "health_workout_analyze":
       return withAuthTracking(env, fetchImpl, () =>
         getWorkoutAnalysis(env, args, fetchImpl),
+      );
+    case "health_sleep_rhythm":
+      return withAuthTracking(env, fetchImpl, () =>
+        getSleepRhythmAnalysis(env, args, fetchImpl),
       );
     case "health_auth_status":
       return getAuthStatus(env);
