@@ -1061,8 +1061,12 @@ test("passToken secrets create and persist a miothealth session without storing 
     logged_in: true,
     method: "pass_token",
     user_id: "account-user",
+    session_state: "verified",
     session_valid: true,
+    last_verified_at: value.last_verified_at,
+    updated_at: value.updated_at,
   });
+  assert.equal(value.last_verified_at, value.updated_at);
   const stored = JSON.parse(await kv.get(TOKEN_KEY));
   assert.equal(stored.auth_method, "pass_token");
   assert.match(stored.device_id, /^an_[0-9a-f]{32}$/);
